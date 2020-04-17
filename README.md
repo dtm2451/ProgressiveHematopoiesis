@@ -6,6 +6,8 @@ Daniel Bunis, Yelena Bronevetsky, Elisabeth Krow-Lucal, Nirav R. Bhakta, Charles
 
 This repository is a companion to a study that is currently submitted for publication. GEO accession numbers for the data will be added once available. The data, both raw and processed, will also be available on figshare at <https://figshare.com/projects/Single-cell_mapping_of_progressive_fetal-to-adult_transition_in_human_hematopoiesis/76143>.
 
+Pre-print manuscript is available at https://papers.ssrn.com/sol3/papers.cfm?abstract_id=3569532.
+
 ## Current citation:
 
 Daniel Bunis, Yelena Bronevetsky, Elisabeth Krow-Lucal, Nirav R. Bhakta, Charles C. Kim, Srilaxmi Nerella, Norman Jones, Ventura F. Mendoza, Yvonne J. Bryson, James E. Gern, Rachel L. Rutishauser, Chun Jimmie Ye, Marina Sirota, Joseph M. McCune, Trevor D. Burt. "Single-cell mapping of progressive fetal-to-adult transition in human hematopoiesis," manuscript in process, 2020.
