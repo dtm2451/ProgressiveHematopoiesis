@@ -1,0 +1,693 @@
+---
+title: "Naive T cell scRNA-seq import and analysis"
+author: "Dan Bunis"
+date: "2/26/2020"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.height = 6, fig.width = 7, warning = F)
+# devtools::install_version(package = "Seurat", version = "3.0.2")
+# install.packages("Seurat")
+library(Seurat)
+library(MAST)
+# BiocManager::install("dtm2451/DittoSeq@v0.3")
+library(dittoSeq)
+library(caret)
+library(ranger)
+# devtools::install_github("enriquea/feser")
+library(feseR)
+library(pROC)
+# install.packages("reticulate")
+library(reticulate)
+# use_python("/anaconda3/envs/r-reticulate/bin/python")
+# # Run this in Terminal
+# # conda create -y -c conda-forge -n seurat umap-learn=0.3
+use_condaenv("r-reticulate")
+```
+
+# 1. Import CellRanger output and add some basic metadata.
+
+```{r}
+Tcells <- CreateSeuratObject(Read10X("Tcells/cellranger_Raw/"))
+DEFAULT <- "Tcells"
+
+#Count and add percent.mito meta
+Tcells[["percent.mito"]] <- PercentageFeatureSet(Tcells, pattern = "^MT-")
+#Count and add percent.ribo meta
+Tcells[["percent.ribo"]] <- PercentageFeatureSet(Tcells, pattern = "^RPS|^RPL")
+```
+
+# 2. Filter Cells based on #genes, #UMI, %mitochondrial
+
+Subset to only cells:
+
+- with at least 750 genes
+- with at least 1500 UMIs
+- with less than 5% mitochondrial UMIs
+
+```{r}
+# These lines can be used to view the raw data before subsetting was performed
+# (note: there are many empty droplets.)
+# multiDBPlot(
+#     c("nFeature_RNA", "nCount_RNA","percent.mito", "percent.ribo"),
+#     group.by = "orig.ident", color.by = "orig.ident", plots = "vlnplot",
+#     ncol = 2)
+# dittoScatterPlot("nFeature_RNA", "nCount_RNA", overlay.color.var = "percent.mito",
+#                  max = 20) +
+#     geom_hline(yintercept = 1500) +
+#     geom_vline(xintercept = 750)
+```
+
+```{r}
+# FILTER by minimum #genes
+Tcells.cut <- subset(Tcells, subset = nFeature_RNA > 750)
+# FILTER by #UMI
+Tcells.cut <- subset(Tcells.cut, subset = nCount_RNA > 1500)
+# FILTER by maximum percent.mito
+Tcells.cut <- subset(Tcells.cut, subset = percent.mito < 5)
+Tcells
+Tcells.cut
+```
+
+# 3. Import Demuxlet information into Seurat.
+
+The data wass generated with three separate 10X lanes, labeled here as CD4, CD4-8, and CD8
+
+```{r}
+Tcells.cut <- importDemux2Seurat(Tcells.cut,
+                                 Demuxlet.best = c("Tcells/Demuxlet/CD4.best",
+                                   "Tcells/Demuxlet/CD4-8.best",
+                                   "Tcells/Demuxlet/CD8.best"),
+                                 lane.names = c("CD4","CD4-8","CD8"), bypass.check = TRUE)
+
+#Remove the "CD4_" at the start of all my sample names due to coming from RNAseq data with those names.
+Tcells.cut[["Sample"]] <- sapply(
+    meta("Sample",Tcells.cut),
+    function(X) strsplit(X, split = "CD4_")[[1]][2])
+```
+
+## Assessmeent of Demuxlet success (before trimming out doublets)
+
+```{r}
+DEFAULT <- "Tcells.cut"
+demux.SNP.summary(
+    "Tcells.cut",
+    plots = c("jitter","vlnplot","boxplot"),
+    boxplot.color = "white",
+    boxplot.fill = F,
+    add.line = 50)
+demux.calls.summary("Tcells.cut", singlets.only = FALSE)
+```
+
+The average SNP count per cell given above is quite high compared to the minimum SNPs required for making highly informed, accurate calls.
+
+# 4. Filter on Demuxlet Singlets, and correct lanes, then add more metadata
+
+```{r}
+Tcells <- subset(Tcells.cut, subset = demux.doublet.call == "SNG")
+table(meta("Lane", Tcells), meta("Sample", Tcells))
+```
+
+We can also see, is that there are very few cells called as samples that were not included in their lanes.  (The 1 in APB1804, Lane3).  We'll remove this cell just a bit later
+
+## Add some extra meta datas:
+
+```{r}
+DEFAULT <- "Tcells"
+
+# Add Age
+Tcells@meta.data$age <- "unknown"
+Tcells@meta.data$age[grep("FS",meta("Sample"))] <- "fetal"
+Tcells@meta.data$age[grep("SLVR",meta("Sample"))] <- "cord"
+Tcells@meta.data$age[grep("APB",meta("Sample"))] <- "adult"
+
+# Add Tcelltype
+    # This is dependent on both sample-assignment and 10X-lane, so I will need to add how samples were added to each lane
+    samples.4 <- c("FS1849", "FS1850", "FS1851", "SLVR007", "SLVR011", "SLVR063", "APB1801", "APB1802", "APB1804", "APB1805")
+    samples.8 <- c("FS1845", "FS1851", "SLVR011", "SLVR018", "SLVR026", "SLVR063", "APB1802", "APB1803", "APB1805")
+    samples.48.4 <- c("FS1845", "FS1848", "SLVR026", "SLVR018", "APB1803") 
+    samples.48.8 <- c("FS1849", "SLVR007", "APB1801", "APB1804")
+    samples.48 <- c(samples.48.4,samples.48.8)
+#For all the cells in each Lane, add the Tcelltype to a "Tcelltype" metadata iff the cell is assigned to a sample from its lane, and a singlet
+Tcells@meta.data$Tcelltype <- NA
+Tcells@meta.data$Tcelltype[(meta("Sample")%in%samples.4) & (meta("Lane")=="CD4")] <- "CD4"
+Tcells@meta.data$Tcelltype[(meta("Sample")%in%samples.48.4) & (meta("Lane")=="CD4-8")] <- "CD4"
+Tcells@meta.data$Tcelltype[(meta("Sample")%in%samples.8) & (meta("Lane")=="CD8")] <- "CD8"
+Tcells@meta.data$Tcelltype[(meta("Sample")%in%samples.48.8) & (meta("Lane")=="CD4-8")] <- "CD8"
+
+#Add a Tage metadata so that I can plot things with the ages and CD4s vs CD8s separately:
+Tcells@meta.data$Tage <- NA
+Tcells@meta.data$Tage[meta("Tcelltype")=="CD4"&!is.na(meta("Tcelltype"))] <- paste0("4-",meta("age")[meta("Tcelltype")=="CD4"&!is.na(meta("Tcelltype"))])
+Tcells@meta.data$Tage[meta("Tcelltype")=="CD8"&!is.na(meta("Tcelltype"))] <- paste0("8-",meta("age")[meta("Tcelltype")=="CD8"&!is.na(meta("Tcelltype"))])
+```
+
+## Subset based on cells being called to a sample from their lane:
+
+```{r}
+# The NA needs to be changed to a value first for Seurat's subset function.
+sum(is.na(meta("Tage")))
+Tcells@meta.data$Tage[is.na(meta("Tage"))] <- "0"
+sum(meta("Tage")=="0")
+Tcells <- subset(Tcells, subset = Tage != "0")
+```
+
+## Add a cell cycle metadata
+
+```{r}
+###Add Cell Cycle
+#From Seurat vignette at https://satijalab.org/seurat/cell_cycle_vignette.html#assign-cell-cycle-scores
+# `The file for the readtable line can be downloaded from the Seurat cell cycle vignette.
+exp.mat <- read.table(file = "nestorawa_forcellcycle_expressionMatrix.txt",
+    header = TRUE, 
+    as.is = TRUE,
+    row.names = 1)
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+#Scoring the cells:
+Tcells <- CellCycleScoring(Tcells, s.features = s.genes, g2m.features = g2m.genes, 
+    set.ident = TRUE)
+# Store as metadata.
+Tcells@meta.data$CellCycle <- Idents(Tcells)
+Idents(Tcells) <- "Lane"
+```
+
+## Visualize after filtering
+
+```{r}
+multi_dittoPlot(
+    c("nFeature_RNA", "nCount_RNA","percent.mito"),
+    group.by = "orig.ident",
+    plots = "vlnplot")
+# Better examined with:
+dittoScatterPlot("nFeature_RNA", "nCount_RNA", color.var = "percent.mito",
+                 max = 20) +
+    geom_hline(yintercept = 1500) +
+    geom_vline(xintercept = 750)
+demux.SNP.summary(
+    plots = c("jitter","vlnplot","boxplot"),
+    boxplot.color = "white",
+    boxplot.fill = F,
+    add.line = 50)
+hold <- meta("Lane")
+Tcells@meta.data$Lane <- factor(
+  meta("Lane"),
+  levels = c("CD4","CD4-8","CD8"),
+  labels = c("Lane1", "Lane2", "Lane3"))
+demux.calls.summary(xlab = NULL) +
+    theme(axis.text.x = element_text(size = 9)) +
+    theme(axis.text.y = element_text(size = 9)) +
+    theme(axis.title.y = element_text(size = 10)) +
+    theme(plot.title = element_text(size = 10))
+Tcells@meta.data$Lane <- hold
+table(meta("Sample"),meta("Lane"),meta("Tcelltype"))
+```
+
+# 5. Data Pre-processing
+
+## Log Transform / ("Normalize") the data
+```{r}
+Tcells <- NormalizeData(
+  object = Tcells,
+  normalization.method = "LogNormalize",
+  scale.factor = 10000,
+  verbose = F)
+```
+
+## Pick variable genes that will be used for PCA & tSNE
+```{r}
+Tcells <- FindVariableFeatures(object = Tcells, verbose = F, nfeatures = 2000)
+```
+
+## Make scaled data for the variable genes, regressing out certain variables
+
+```{r}
+#Scale without regressing out any variables
+Tcells <- ScaleData(
+  object = Tcells,
+  vars.to.regress = c("CellCycle", "percent.mito", "nCount_RNA"),
+  verbose = F)
+```
+
+# 6. Run PCA
+
+```{r}
+#Run PCA
+Tcells <- RunPCA(
+  object = Tcells,
+  verbose = T,
+  npcs = 50)
+```
+
+## Use PCheatmaps, PCElbowPlot, and JackStrawPlot to pick which PCs to carry forward into tSNE and clustering
+
+```{r}
+PCHeatmap(
+    object = Tcells,
+    dims = 1:18, 
+    cells = 2000, 
+    balanced = TRUE
+)
+ElbowPlot(object = Tcells)
+#WARNING: JackStraw takes a long time to run.
+Tcells <- JackStraw(object = Tcells, num.replicate = 100, dims = 20, verbose = TRUE)
+Tcells <- ScoreJackStraw(Tcells, dims = 1:20)
+JackStrawPlot(object = Tcells, dims = 1:20)
+```
+
+The large change in p value magnitude from 9 to 10, and 9 pcs being around an inflection point in the elbow plot went into my picking PCs1-9 for tSNE and clustering.
+
+# 7. Run tSNE
+```{r tSNE}
+Tcells <- RunTSNE(
+  object = Tcells,
+  reduction.use = "pca",
+  dims = 1:9,
+  seed.use = 1)
+
+dittoDimPlot("Tage", size = 2)
+```
+
+# 8. Run clustering
+```{r clustering, echo=T}
+Tcells <- FindNeighbors(Tcells,
+                        reduction = "pca",
+                        k.param = 20,
+                        dims = 1:9)
+# Tcells <- FindClusters(Tcells,
+#                        modularity.fxn = 1,
+#                        algorithm = 1,
+#                        resolution = c(seq(0.1,1,0.1)))
+Tcells <- FindClusters(Tcells,
+                       modularity.fxn = 1,
+                       algorithm = 1,
+                       resolution = 0.1)
+```
+
+# 9. Run UMAP
+```{r umap, fig.height = 5, fig.width = 6}
+Tcells <- RunUMAP(
+  object = Tcells,
+  reduction = "pca",
+  dims = 1:9,
+  umap.method = "umap-learn",
+  seed.use = 1)
+```
+
+```{r}
+DEFAULT <- "Tcells"
+#Colored with CD4s lighter and CD8s darker 
+dittoDimPlot("Tage", Tcells, size = 1, reduction.use = "umap",
+          colors = c(1:3,9:11), main = "T cells Lineage and Stage",
+          rename.var.groups = c("Adult-CD4", "UCB-CD4", "Fetal-CD4",
+                            "Adult-CD8", "UCB-CD8","Fetal-CD8"))
+
+plots <- list(
+    dittoDimPlot(
+        "Tage", size = 0.5, reduction.use = "umap", cells.use = meta("Tage")=="4-adult",
+        colors = 1, legend.show = FALSE, ylab = NULL, xlab = NULL, main = NULL,
+        show.axes.numbers = FALSE),
+    dittoDimPlot(
+        "Tage", size = 0.5, reduction.use = "umap", cells.use = meta("Tage")=="4-cord",
+        colors = 2, legend.show = FALSE, ylab = NULL, xlab = NULL, main = NULL,
+        show.axes.numbers = FALSE),
+    dittoDimPlot(
+        "Tage", size = 0.5, reduction.use = "umap", cells.use = meta("Tage")=="4-fetal",
+        colors = 3, legend.show = FALSE, ylab = NULL, xlab = NULL, main = NULL,
+        show.axes.numbers = FALSE),
+    dittoDimPlot(
+        "Tage", size = 0.5, reduction.use = "umap", cells.use = meta("Tage")=="8-adult",
+        colors = 9, legend.show = FALSE, ylab = NULL, xlab = NULL, main = NULL,
+        show.axes.numbers = FALSE),
+    dittoDimPlot(
+        "Tage", size = 0.5, reduction.use = "umap", cells.use = meta("Tage")=="8-cord",
+        colors = 10, legend.show = FALSE, ylab = NULL, xlab = NULL, main = NULL,
+        show.axes.numbers = FALSE),
+    dittoDimPlot(
+        "Tage", size = 0.5, reduction.use = "umap", cells.use = meta("Tage")=="8-fetal",
+        colors = 11, legend.show = FALSE, ylab = NULL, xlab = NULL, main = NULL,
+        show.axes.numbers = FALSE),
+    dittoDimPlot(
+        "Tage", size = 1, reduction.use = "umap", legend.show = FALSE,
+        color.panel = dittoColors()[c(1:3,9:11)], main = NULL),
+    dittoSeq:::.grab_legend(dittoDimPlot(
+        "Tage", size = 1, reduction.use = "umap",
+        color.panel = dittoColors()[c(1:3,9:11)],
+        rename.var.groups = c("CD4-adult", "CD4-UCB", "CD4-fetal",
+                              "CD8-adult", "CD8-UCB", "CD8-fetal")))
+)
+pdf("Tcells-Figs/Tcell_umap_surround.pdf", w=6, h=6)
+gridExtra::grid.arrange(grobs = plots,
+    layout_matrix = matrix(c(
+        7,7,7,4,
+        7,7,7,5,
+        7,7,7,6,
+        1,2,3,8), ncol = 4))
+dev.off()
+```
+
+#10 Quantify Clustering
+
+```{r}
+age.clust <- factor(meta("RNA_snn_res.0.1"), labels = c("adult-cluster", "cord-cluster", "fetal-cluster"))
+Tcells@meta.data$age.cluster <- as.character(age.clust)
+Idents(Tcells) <- "age.cluster"
+
+pdf("Tcells-Figs/Clustering-umap_small.pdf", width = 3, height = 1.5)
+dittoDimPlot(size=0.3, do.label = FALSE, main = NULL,
+    xlab = NULL, ylab = NULL, show.axes.numbers = FALSE, reduction.use = "umap",
+    rename.var.groups = c("adult-cluster", "UCB-cluster", "fetal-cluster"))
+dev.off()
+
+pdf("Tcells-Figs/Clustering-4s.pdf", width = 4, height = 1.7)
+dittoBarPlot("ident", group.by = "Sample",
+          x.reorder = c(6:10,11:15,1:5),
+          main = NULL,
+          cells.use = meta("Tcelltype")=="CD4",
+          ylab = "Fraction of CD4\nin each cluster",
+          legend.show = FALSE, legend.title = "Clusters",
+          x.labels = c(paste0("F",1:5),paste0("U",1:5),paste0("A",1:5)),
+          x.labels.rotate = T,
+          xlab = NULL)
+dev.off()
+
+pdf("Tcells-Figs/Clustering-8s.pdf", width = 4, height = 1.7)
+dittoBarPlot("ident", group.by = "Sample",
+          x.reorder = c(6:8,9:13,1:5),
+          main = NULL,
+          cells.use = meta("Tcelltype")=="CD8",
+          ylab = "Fraction of CD8\nin each cluster",
+          legend.show = FALSE, legend.title = "Clusters",
+          x.labels = c(paste0("F",1:5),paste0("U",1:5),paste0("A",1:5))[c(1,3,5:15)],
+          x.labels.rotate = T,
+          xlab = NULL)
+dev.off()
+
+# Percentage of fetal cells in fetal-cluster
+sum(meta("ident")=="fetal-cluster" & meta("age")=="fetal") / sum(meta("age")=="fetal")
+
+# Percentage of UCB cells in UCB-cluster
+sum(meta("ident")=="cord-cluster" & meta("age")=="cord") / sum(meta("age")=="cord")
+
+# Percentage of adult cells in adult-cluster
+sum(meta("ident")=="adult-cluster" & meta("age")=="adult") / sum(meta("age")=="adult")
+
+# Total percentage matching their age
+(sum(meta("ident")=="fetal-cluster" & meta("age")=="fetal") +
+    sum(meta("ident")=="cord-cluster" & meta("age")=="cord") +
+    sum(meta("ident")=="adult-cluster" & meta("age")=="adult")) /
+    length(colnames(Tcells))
+
+# Total percent UCB samples' cells in UCB cluster, CD4s
+x <- table(
+  meta("Sample")[meta("age")=="cord" & meta("Tcelltype")=="CD4"],
+  meta("age.cluster")[meta("age")=="cord" & meta("Tcelltype")=="CD4"])
+x[,2]/rowSums(x)
+
+# Total percent UCB samples' cells in UCB cluster, CD8s
+y <- table(
+  meta("Sample")[meta("age")=="cord" & meta("Tcelltype")=="CD8"],
+  meta("age.cluster")[meta("age")=="cord" & meta("Tcelltype")=="CD8"])
+y[,2]/rowSums(y)
+
+# Mean of number of cells per UCB sample, per T cell lineage, clustering as UCB 
+mean(c(x[,2]/rowSums(x), y[,2]/rowSums(y)))
+```
+
+#11 Output differential expression
+
+```{r}
+Idents(Tcells) <- "age"
+FvA <- FindMarkers(Tcells,
+                       ident.1 = "fetal",
+                       ident.2 = "adult",
+                       test.use = "MAST")
+FvA_padjFC <- FvA[abs(FvA$avg_logFC)>=(log2(1.5)) &
+                            FvA$p_val_adj<0.05 &
+                            !(is.na(FvA$p_val_adj)),]
+FvC <- FindMarkers(Tcells,
+                       ident.1 = "fetal",
+                       ident.2 = "cord",
+                       test.use = "MAST")
+FvC_padjFC <- FvC[abs(FvC$avg_logFC)>=(log2(1.5)) &
+                            FvC$p_val_adj<0.05 &
+                            !(is.na(FvC$p_val_adj)),]
+CvA <- FindMarkers(Tcells,
+                       ident.1 = "cord",
+                       ident.2 = "adult",
+                       test.use = "MAST")
+CvA_padjFC <- CvA[abs(CvA$avg_logFC)>=(log2(1.5)) &
+                           CvA$p_val_adj<0.05 &
+                            !(is.na(CvA$p_val_adj)),]
+write.csv(FvA_padjFC, row.names = TRUE, quote = FALSE, file = "Tcells_DiffExp_scFetalvsAdult.csv")
+write.csv(FvC_padjFC, row.names = TRUE, quote = FALSE, file = "Tcells_DiffExp_scFetalvUCB.csv")
+write.csv(CvA_padjFC, row.names = TRUE, quote = FALSE, file = "Tcells_DiffExp_scUCBvAdult.csv")
+```
+
+# 12 Immunological Age Scoring
+
+Steps:
+
+1. Pick out a 10% of fetal and adult cells training set
+2. Calculate the FvA markers for that set
+3. Run correlation and random-forest feseR to narrow down the genelist.
+4. Generate RFmodels based on feseR-restricted genesets
+5. Check accuracy in fetal vs adult cells that were not in the training set
+6. Score UCB (refered to as "cord" within the object)
+
+```{r}
+set.seed(1909)
+
+### 0. Set ident to age.
+Idents(Tcells) <- "age"
+
+### 1. Pick 10% training group
+inTraining <- createDataPartition(Idents(Tcells), p=0.1, list = FALSE)
+#Trim to adult and fetal indices
+inTraining <- inTraining[Idents(Tcells)[inTraining]%in%c("fetal","adult")]
+sum(meta("age")[inTraining]=="adult")/sum(meta("age")[inTraining]%in%c("fetal", "adult"))
+sum(meta("ident")=="adult")/sum(meta("ident")%in%c("fetal", "adult"))
+
+### 2. Obtain markers
+# Set Idents to 0 for non-training cells
+age.inTrain <- meta("age")
+age.inTrain[-inTraining] <- 0
+# age.inTrain[inTraining]
+Idents(Tcells) <- age.inTrain
+# Obtain markers
+FvA <- FindMarkers(Tcells,
+                       ident.1 = "fetal",
+                       ident.2 = "adult",
+                       test.use = "MAST")
+FvA_padjFC <- FvA[abs(FvA$avg_logFC)>=(log2(1.5)) &
+                            FvA$p_val_adj<0.05 &
+                            !(is.na(FvA$p_val_adj)),]
+markers <- rownames(FvA_padjFC)
+
+### 3. Run FESER to recursively eliminate features
+#Grab data
+training <- as.matrix(t(GetAssayData(Tcells)[markers,inTraining]))
+# Creating the outcome score values
+Train_val <- array(1, length(inTraining))
+Train_val[meta("age")[inTraining]=="fetal"] <- 0
+#Run feseR correlation step
+training.trim <- filter.corr(scale(training), Train_val, mincorr = 0.3)
+#Run feseR random forest step
+feser <- rfeRF(
+  features = training.trim,
+  class = Train_val,
+  number.cv = 10,
+  group.sizes = seq_len(ncol(training.trim)),
+  metric = "ROC",
+  verbose = FALSE)
+#Pick optimal feser variables
+(markers.feser <- feser$optVariables)
+```
+
+There are more than 20 features still.
+
+```{r}
+#Explore feseR results
+feser$results
+```
+
+But, we can trim down to 17 and still keep ROC, sensitivity, and specificity above 0.99.
+
+```{r}
+### Extract the optVariables for using 17 total...
+# Count how many of the repeated runs each feature ended up in.
+vars17 <- unique(feser$variables$var[feser$variables$Variables==17])
+(vars17.counts <- sapply(vars17, function(X) length(grep(X, feser$variables$var[feser$variables$Variables==17]))))
+```
+
+```{r}
+# Extract the ones that showed up the most
+(vars.use <- names(head(vars17.counts[order(vars17.counts, decreasing = TRUE)], 17)))
+```
+
+```{r}
+markers.feser <- vars.use
+
+### 4. Generate final RF model
+#Grab data
+training <- as.matrix(t(GetAssayData(Tcells)[markers.feser,inTraining]))
+# Creating the outcome score values
+Train_val <- array(1, length(inTraining))
+Train_val[meta("age")[inTraining]=="fetal"] <- 0
+# Make the model
+rf_mod <- train(Train_val ~ .,
+              set.seed(998),
+              data= cbind(training,Train_val),
+              method = "ranger",
+              metric = "MAE",
+              trControl = trainControl(method = "cv",
+                                       number = 3,
+                                       repeats = 3),
+              tuneGrid = expand.grid(mtry = round(length(markers.feser)*.75,0),
+                                     splitrule = c("extratrees"),
+                                     min.node.size = 1)
+              )
+
+### 5. Score all
+Tcells@meta.data$RFScore <- as.double(predict(rf_mod,t(GetAssayData(Tcells)[markers.feser,])))
+Tcells@meta.data$inTraining <- FALSE
+Tcells@meta.data$inTraining[inTraining] <- TRUE
+
+### 6. Score FvA accuracy
+# Set ident back to full age.
+Idents(Tcells) <- "age"
+roc_obj <- roc(response = as.numeric(meta("ident")[!(meta("inTraining")) &
+                                                   meta("ident")%in%c("fetal", "adult")]=="adult"),
+               predictor = meta("RFScore")[!(meta("inTraining")) &
+                                               meta("ident")%in%c("fetal", "adult")],
+               plot = T)
+auc(roc_obj)
+```
+
+```{r}
+dittoPlot("RFScore", cells.use = meta("inTraining"),
+       group.by = "Sample", color.by = "age",
+       plots = c("jitter","vlnplot"),
+       boxplot.color = "white", boxplot.fill = F,
+       vlnplot.lineweight = 0.3, vlnplot.width = 3,
+       sub = "in Training", colors = c(1,3))
+
+### 7. Check the look for all T cells.
+dittoPlot("RFScore", cells.use = !(meta("inTraining")),
+       group.by = "Sample", color.by = "age",
+       plots = c("jitter","vlnplot"),
+       boxplot.color = "white", boxplot.fill = F,
+       vlnplot.lineweight = 0.3, vlnplot.width = 5,
+       sub = "NOT in training")
+dittoDimPlot("RFScore", cells.use = !(meta("inTraining")),
+             sub = "NOT in training", size = 2, reduction.use = "umap")
+```
+
+
+```{r}
+pdf("Tcells-Figs/Tcell_train-umap.pdf", w=1.38, h=1.3)
+dittoDimPlot("age", colors = c(1,3), cells.use = meta("inTraining"), main = NULL,
+             xlab = NULL, ylab = NULL, legend.show = FALSE, size = 0.3, reduction.use = "umap",
+             show.axes.numbers = FALSE)
+dev.off()
+pdf("Tcells-Figs/Tcell_extend-umap.pdf", w=3.1, h=1.7)
+dittoDimPlot("RFScore", colors = c(1,3), main = NULL,
+             xlab = NULL, ylab = NULL, legend.show = TRUE, size = 0.5,
+             legend.breaks = c(0,0.5,1), legend.breaks.labels = c("0, fetal-like", "0.5", "1, adult-like"),
+             reduction.use = "umap", show.axes.numbers = FALSE)
+dev.off()
+```
+
+```{r}
+pdf("Tcells-Figs/RFScore-4s.pdf", width = 6, height = 3)
+dittoPlot("RFScore", group.by = "Sample", color.by = "age",
+       cells.use = meta("Tcelltype")=="CD4",
+       plots = c("jitter","vlnplot"),
+       boxplot.color = "white", boxplot.fill = F, boxplot.width = 0.4,
+       jitter.size = 0.3,
+       vlnplot.lineweight = 0.3, vlnplot.width = 7,
+       x.labels = c(paste0("Fetal-",1:5),paste0("UCB-",1:5),paste0("Adult-",1:5)),
+       x.reorder = c(6:15,1:5),
+       y.breaks = seq(0,1,.5),
+       legend.show = FALSE,
+       xlab = NULL,
+       ylab = "Immunological Age Score",
+       main = "Immunological Age Score - Naive CD4 T cells"
+       )
+dev.off()
+pdf("Tcells-Figs/RFScore-8s.pdf", width = 6, height = 3)
+dittoPlot("RFScore", group.by = "Sample", color.by = "age",
+       cells.use = meta("Tcelltype")=="CD8",
+       plots = c("jitter","vlnplot"),
+       boxplot.color = "white", boxplot.fill = F, boxplot.width = 0.4,
+       jitter.size = 0.3,
+       vlnplot.lineweight = 0.3, vlnplot.width = 7,
+       x.labels = c(paste0("Fetal-",1:5),paste0("UCB-",1:5),paste0("Adult-",1:5))[c(1,3,5:15)],
+       x.reorder = c(6:13,1:5),
+       y.breaks = seq(0,1,.5),
+       legend.show = FALSE,
+       xlab = NULL,
+       ylab = "Immunological Age Score",
+       main = "Immunological Age Score - Naive CD8 T cells"
+       )
+dev.off()
+```
+
+## Scores Summary
+
+```{r}
+# Scores less than 0.1
+  # fetal
+sum((meta("RFScore")<0.1 & meta("age")=="fetal")) / sum(meta("age")=="fetal")
+  # cord
+sum((meta("RFScore")<0.1 & meta("age")=="cord")) / sum(meta("age")=="cord")
+  # adult
+sum((meta("RFScore")<0.1 & meta("age")=="adult")) / sum(meta("age")=="adult")
+
+# Scores between 0.1 and 0.9
+  # fetal
+sum((meta("RFScore")>=0.1 & meta("RFScore")<=0.9 & meta("age")=="fetal")) / sum(meta("age")=="fetal")
+  # cord
+sum((meta("RFScore")>=0.1 & meta("RFScore")<=0.9 & meta("age")=="cord")) / sum(meta("age")=="cord")
+  # adult
+sum((meta("RFScore")>=0.1 & meta("RFScore")<=0.9 & meta("age")=="adult")) / sum(meta("age")=="adult")
+
+# Scores greater than 0.9
+  # fetal
+sum((meta("RFScore")>0.9 & meta("age")=="fetal")) / sum(meta("age")=="fetal")
+  # cord
+sum((meta("RFScore")>0.9 & meta("age")=="cord")) / sum(meta("age")=="cord")
+  # adult
+sum((meta("RFScore")>0.9 & meta("age")=="adult")) / sum(meta("age")=="adult")
+
+# mean & stdev
+  # fetal
+mean(meta("RFScore")[meta("age")=="fetal"])
+sd(meta("RFScore")[meta("age")=="fetal"])
+  # cord
+mean(meta("RFScore")[meta("age")=="cord"])
+sd(meta("RFScore")[meta("age")=="cord"])
+  # adult
+mean(meta("RFScore")[meta("age")=="adult"])
+sd(meta("RFScore")[meta("age")=="adult"])
+```
+
+## RF Model Markers expression comparison
+
+```{r}
+# Reorder to put UCB~fetal-like genes first and UCB~adult-like genes last
+markers.feser <- markers.feser[c(1,9,12,15,2:4,6,8:10,11,14,17,13,16,5)]
+pdf("Tcells-Figs/RFmarkers_Tcells.pdf", w = 7.5, h = 6.5)
+multi_dittoPlot(markers.feser, group.by = "age", ncol = 5, nrow = 4,
+    x.reorder = 3:1, x.labels = c("F","U","A"), x.labels.rotate = FALSE,
+    vlnplot.lineweight = 0.3, jitter.size = 0.2)
+dev.off()
+```
+
+# 13 SAVE
+```{r}
+saveRDS(Tcells, file = "Tcells.rds")
+```

@@ -1,0 +1,851 @@
+---
+title: "HSPCs scRNA-seq import and analysis"
+author: "Dan Bunis"
+date: "2/26/2020"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.height = 6, fig.width = 7, warning = F)
+# devtools::install_version(package = "Seurat", version = "3.0.2")
+library("Seurat")
+library(MAST)
+# BiocManager::install("dtm2451/DittoSeq@v0.3")
+library(dittoSeq)
+library(caret)
+library(ranger)
+# devtools::install_github("enriquea/feser")
+library(feseR)
+library(pROC)
+# install.packages("reticulate")
+library(reticulate)
+library(SingleR)
+library(slingshot)
+```
+
+# 1. Import CellRanger outputs
+
+```{r}
+HSPCs <- Read10X("HSPCs/cellranger_Raw/")
+colnames(HSPCs) <- paste0(colnames(HSPCs), "-1")
+HSPCs <- CreateSeuratObject(HSPCs)
+DEFAULT <- "HSPCs"
+get.metas()
+```
+
+```{r}
+#Add percent.mito metadata
+HSPCs[["percent.mito"]] <- PercentageFeatureSet(HSPCs, pattern = "^MT-")
+HSPCs[["percent.ribo"]] <- PercentageFeatureSet(HSPCs, pattern = "^RPS|^RPL")
+dittoScatterPlot(x.var = "nCount_RNA", y.var = "nFeature_RNA", color.var = "percent.mito")
+```
+
+# 2. Filter Cells based on #genes, #UMI, %mitochondrial
+
+Subset to only cells:
+
+- with at least 750 genes
+- with at least 1500 UMIs
+- with less than 5% mitochondrial UMIs
+
+```{r}
+#### nUMI>1500 & nGene>750 & percent.mito < 0.07:
+HSPCs.cut <- subset(HSPCs, subset = nCount_RNA > 1500)
+HSPCs.cut <- subset(HSPCs.cut, subset = nFeature_RNA > 750)
+HSPCs.cut <- subset(HSPCs.cut, subset = percent.mito < 7)
+
+DEFAULT <- "HSPCs.cut"
+
+#Plot
+dittoScatterPlot(x.var = "nCount_RNA", y.var = "nFeature_RNA", color.var = "percent.mito",
+                 object = HSPCs, cells.use = colnames(HSPCs.cut), show.others = TRUE)
+# DittoKneePlot(raw.object = "HSPCs", QC.object = "HSPCs.cut", nUMI.metadata.name = "nCount_RNA")
+multi_dittoPlot(c("nCount_RNA", "nFeature_RNA", "percent.mito", "percent.ribo"),
+            group.by = "orig.ident", color.by = "orig.ident",
+            object = HSPCs.cut,
+            ncol = 2)
+```
+
+# 3. Add sample annotations bassed on demuxlet, then trim to singlets.
+
+```{r}
+HSPCs.cut <- importDemux2Seurat(HSPCs.cut,
+                                Demuxlet.best = "HSPCs/Demuxlet/HSPC.best")
+demux.SNP.summary(object = HSPCs.cut, add.line = 50)
+```
+
+```{r}
+HSPCs.cut <- subset(HSPCs.cut, subset = demux.doublet.call == "SNG")
+demux.calls.summary(HSPCs.cut)
+```
+
+There are a few cells attributed to samples that were not in the lane.  Remove these too.
+
+```{r}
+HSPCs.cut@meta.data$Sample.in.lane <- 
+  meta("Sample","HSPCs.cut") %in% c("CD4_APB1803","CD4_APB1804",
+                                    "CD4_FS1849", "CD4_FS1850", "CD4_FS1851",
+                                    "CD4_SLVR007", "CD4_SLVR063")
+HSPCs.cut <- subset(HSPCs.cut, subset = Sample.in.lane )
+```
+
+Remove the "CD4_" from the start of the sample names.  (Genotyping was obtained from each sample's naive CD4 T cell bulk RNAseq data.)
+
+```{r}
+HSPCs.cut@meta.data$Sample <- factor(meta("Sample","HSPCs.cut"),
+                                     levels = c("CD4_APB1803","CD4_APB1804",
+                                                "CD4_FS1849","CD4_FS1850","CD4_FS1851",
+                                                "CD4_SLVR007", "CD4_SLVR063"),
+                                     labels = c("APB1803","APB1804",
+                                                "FBM1849","FBM1850","FBM1851",
+                                                "SLVR007", "SLVR063"))
+dittoScatterPlot(x.var = "nCount_RNA", y.var = "nFeature_RNA",
+                 object = "HSPCs", cells.use = colnames(HSPCs.cut),
+                 show.others = TRUE)
+```
+
+```{r}
+HSPCs <- HSPCs.cut
+rm(HSPCs.cut)
+DEFAULT <- "HSPCs"
+```
+
+# 4. Add age metadata based on sample names
+
+```{r}
+# Add Age
+HSPCs@meta.data$age <- "unknown"
+HSPCs@meta.data$age[grep("FBM",meta("Sample"))] <- "fetal"
+HSPCs@meta.data$age[grep("SLVR",meta("Sample"))] <- "cord"
+HSPCs@meta.data$age[grep("APB",meta("Sample"))] <- "adult"
+```
+
+# 5. Some joint pre-processing, then integration with Seurat's built in method
+
+```{r}
+# Log Transform / ("Normalize") the data
+HSPCs <- NormalizeData(
+  object = HSPCs,
+  normalization.method = "LogNormalize",
+  scale.factor = 10000,
+  display.progress = F)
+HSPCs <- FindVariableFeatures(HSPCs, verbose = F, nfeatures = 2000)
+
+# Subset to make separate objects for each age
+fetal <- subset(HSPCs, subset = age == "fetal")
+cord <- subset(HSPCs, subset = age == "cord")
+adult <- subset(HSPCs, subset = age == "adult")
+
+# Intergrate with Seurat's anchors method, but calculate for all genes.
+HSPC.anchors <- FindIntegrationAnchors(object.list = list(fetal, cord, adult), dims = 1:20)
+HSPC.recombined <- IntegrateData(anchorset = HSPC.anchors, dims = 1:20, features.to.integrate = rownames(GetAssayData(HSPCs)))
+```
+
+# Pre-processing the integrated data
+
+```{r}
+DefaultAssay(HSPC.recombined) <- "integrated"
+
+# Run the standard workflow for visualization and clustering
+HSPC.recombined <- FindVariableFeatures(HSPC.recombined, verbose = F, nfeatures = 2000)
+HSPC.recombined <- ScaleData(HSPC.recombined, verbose = FALSE)
+HSPC.recombined <- RunPCA(HSPC.recombined, npcs = 30, verbose = FALSE)
+# t-SNE
+# HSPC.recombined <- RunTSNE(HSPC.recombined, reduction = "pca", dims = 1:20)
+# Clustering
+HSPC.recombined <- FindNeighbors(HSPC.recombined, reduction = "pca", dims = 1:20)
+HSPC.recombined <- FindClusters(HSPC.recombined, resolution = 1.0)
+# UMAP
+HSPC.recombined <- RunUMAP(
+  HSPC.recombined,
+  reduction = "pca",
+  dims = 1:20)
+```
+
+```{r}
+# Plot
+dittoDimPlot("age", HSPC.recombined, reduction.use = "umap")
+dittoDimPlot("integrated_snn_res.1", HSPC.recombined, reduction.use = "umap")
+
+pdf("HSPCs-Figs/HSPCs_umap_age.pdf", w=3.4, h=2.6)
+dittoDimPlot("age", HSPC.recombined, reduction.use = "umap",
+             main = "Age",
+             rename.var.groups = c("Adult", "UCB", "Fetal"),
+             size = 0.75)
+dev.off()
+```
+
+Integration worked. I returned this ".recombined" object to be the "HSPCs" object now.
+
+```{r}
+HSPCs <- HSPC.recombined
+```
+
+# 6. Annotate Cell Types
+
+### 1. Run SingleR
+
+```{r}
+DefaultAssay(HSPCs) <- "RNA"
+# Obtain the premade BlueprintEncode reference set which contains immune and hematopoietic cells
+blueprint.encode <- BlueprintEncodeData()
+
+#Run SingleR
+blueprint <- SingleR(test = as.SingleCellExperiment(HSPCs),
+                     ref = blueprint.encode,
+                     labels = blueprint.encode$label.fine)
+
+# Grab labels, but change pruned NAs to character "NA"s
+HSPCs@meta.data$blueprint <- blueprint$labels
+dittoDimPlot("blueprint", reduction.use = "umap", do.letter = FALSE,
+             cells.use = !is.na(blueprint$pruned.labels),
+             do.label = TRUE)
+```
+
+### 2. Run Slingshot Trajectory Analysis
+
+```{r}
+DefaultAssay(HSPCs) <- "integrated"
+HSPCs_sling_clust1.0 <- getLineages(
+  as.SingleCellExperiment(HSPCs),
+  clusterLabels = 'integrated_snn_res.1',
+  reducedDim = 'PCA',
+  start.clus = '2')
+
+# Plot
+dittoDimPlot(
+  "integrated_snn_res.1",
+  reduction.use = "umap",
+  do.letter = FALSE,
+  do.label = TRUE,
+  add.trajectory.lineages = SlingshotDataSet(HSPCs_sling_clust1.0)@lineages,
+  trajectory.cluster.meta = "integrated_snn_res.1")
+
+pdf("HSPCs-Figs/HSPCs_umap_clustering.pdf", w=2.42, h=2.6)
+dittoDimPlot("integrated_snn_res.1", reduction.use = "umap",
+             main = "Clustering",
+             legend.show = FALSE,
+             add.trajectory.lineages = slingshot::SlingshotDataSet(HSPCs_sling_clust1.0)@lineages,
+             trajectory.cluster.meta = "integrated_snn_res.1",
+             trajectory.arrow.size = 0.075,
+             do.letter = FALSE,
+             do.label = FALSE,
+             colors = c(1:3,4,5:12,14))
+dev.off()
+```
+
+### 3. Determine clusters' maximal calls
+
+```{r}
+# After combining HSCs and MPPs into one call, "HSC/MPP"...
+HSPCs@meta.data$blueprint_hscmpp <- gsub("HSC|MPP", "HSC/MPP", meta("blueprint"))
+# Obtain the max call for each cluster
+get.max.annot <- function(index){
+  calls.table <- table(meta("integrated_snn_res.1", "HSPCs"), meta("blueprint_hscmpp", "HSPCs"))
+  colnames(calls.table)[calls.table[index,]==max(calls.table[index,])]
+}
+HSPCs@meta.data$cluster_max <- 
+  factor(meta("integrated_snn_res.1"),
+         levels = meta.levels("integrated_snn_res.1"),
+         labels = sapply(meta.levels("integrated_snn_res.1"),
+                         function (X) get.max.annot(X)))
+# Plot
+dittoDimPlot(
+  "cluster_max", reduction.use = "umap",
+  add.trajectory.lineages = SlingshotDataSet(HSPCs_sling_clust1.0)@lineages,
+  trajectory.cluster.meta = "integrated_snn_res.1")
+```
+
+### 4. Rename clusters at ends of trees by their maximal annotations.
+
+Internal clusters named as "mid"
+
+```{r}
+# Rename clusters at ends of lineages with their max annotations
+# "mid" = 1, 5, 10 
+# HSC/MPP = 0 & 2
+# CLP = 6, 7, 9, 11
+# MEP = 3, 12
+# GMP = 4, 8
+HSPCs@meta.data$trajectory_calls <- 
+  factor(meta("integrated_snn_res.1"),
+         meta.levels("integrated_snn_res.1"),
+         labels = c("HSC/MPP", # 0
+                    "mid", # 1
+                    "mid", # 10
+                    "CLP", # 11
+                    "MEP", # 12
+                    "HSC/MPP", # 2
+                    "MEP", # 3
+                    "GMP", # 4
+                    "mid", # 5
+                    "CLP", # 6
+                    "CLP", # 7
+                    "GMP", # 8
+                    "CLP"))# 9
+
+# Plot
+dittoDimPlot(
+  "trajectory_calls",
+  reduction.use = "umap",
+  add.trajectory.lineages = SlingshotDataSet(HSPCs_sling_clust1.0)@lineages,
+  trajectory.cluster.meta = "integrated_snn_res.1")
+
+pdf("HSPCs-Figs/HSPCs_umap_trajGroups.pdf", w=3.7, h=2.6)
+dittoDimPlot("trajectory_calls", reduction.use = "umap",
+             main = "Trajectory-end Clusters",
+             legend.show = TRUE,
+             do.letter = FALSE,
+             add.trajectory.lineages = slingshot::SlingshotDataSet(HSPCs_sling_clust1.0)@lineages,
+             trajectory.cluster.meta = "integrated_snn_res.1",
+             trajectory.arrow.size = 0.075,
+             cells.use = meta("trajectory_calls")!= "mid",
+             colors = c(7,5,6,4)
+             )
+dev.off()
+```
+
+# 5. Validate cell types by marker expression
+
+## HSPC marks genes
+
+```{r}
+pdf("HSPCs-Figs/HSPCs_MEPmarkers.pdf", w= 5.5, h = 2)
+MEP.genes <- c("GATA1", "CD36", "KLF1")
+multi_dittoDimPlot(MEP.genes, reduction.use = "umap", ncol = 3)
+dev.off()
+
+pdf("HSPCs-Figs/HSPCs_GMPmarkers.pdf", w= 5.5, h = 2)
+GMP.genes <- c("MPO", "ELANE", "LYZ")
+multi_dittoDimPlot(GMP.genes, reduction.use = "umap", ncol = 3)
+dev.off()
+
+pdf("HSPCs-Figs/HSPCs_CLPmarkers.pdf", w= 5.5, h = 2)
+CLP.genes <- c("MME", "IL7R")
+multi_dittoDimPlot(CLP.genes, reduction.use = "umap", ncol = 3)
+dev.off()
+
+pdf("HSPCs-Figs/HSPCs_markers_legend.pdf", w= 5.5/3, h = 2)
+dittoSeq:::.grab_legend(
+  dittoDimPlot("MME", HSPCs, reduction.use = "umap",
+               legend.breaks = c(0,max(gene("MME",HSPCs))),
+               legend.breaks.labels = c(0, "Highest Expression"))
+  )
+dev.off()
+```
+
+# 6. Quantify cell types
+
+```{r}
+# Establish trajectory_end label names with "N/A" instead of "mid" 
+renames <- meta.levels("trajectory_calls")[c(5, 3, 4, 1, 2)]
+renames[1] <- "N/A"
+
+### Number of cell types per sample:
+pdf("HSPCs-Figs/HSPCs_trajectory_calls_bySample.pdf", w=4, h=2.5)
+dittoBarPlot("trajectory_calls", group.by = "Sample", main = NULL,
+             x.labels.rotate = TRUE, x.reorder = c(3:5,6,7,1,2),
+             scale = "percent",
+             x.labels = c("Fetal-1", "Fetal-2","Fetal-3", "UCB-1", "UCB-2", "Adult-1","Adult-2"),
+             var.labels.reorder = c(5, 3, 4, 1, 2),
+             var.labels.rename = renames,
+             color.panel = c("gray90", dittoColors()[7:4]),
+             xlab = NULL
+             ) + theme(axis.text.x = element_text(size = 9))
+dev.off()
+```
+
+```{r}
+### Number of cells of each age per celltype annotation
+pdf("HSPCs-Figs/HSPCs_trajectory_calls_byAge.pdf", w=3.5, h=2.5)
+dittoBarPlot("age", group.by = "trajectory_calls", main = NULL,
+             x.labels.rotate = TRUE, x.reorder = c(3,4,1,2,5),
+             x.labels = renames[c(2:5,1)],
+             scale = "percent",
+             xlab = NULL
+             ) + theme(axis.text.x = element_text(size = 9))
+dev.off()
+```
+
+### Statistical analysis of overall composition changes:
+
+```{r}
+# Obtain total numbers of cells of each type per age
+all <- table(meta("age"), meta("trajectory_calls"))
+FvC <- all[2:3,]
+FvA <- all[c(1,3),]
+CvA <- all[1:2,]
+
+# Run chi.squared on all, Fetal vs UCB, Fetal vs Adult, and UCB vs Adult
+chisq.test(all)
+chisq.test(FvC)
+chisq.test(FvA)
+chisq.test(CvA)
+```
+
+All are statistically significant!
+
+# 7. Immunological Age Scoring
+
+To do so, I need to do these steps for each cluster:
+
+1. Pick out a semi-ratio-equalized fetal and adult training set.
+2. Calculate the FvA markers for that set.
+  - pval <= 0.05 FDR
+  - absolute FC >= 1.5
+3. Run correlation and random-forest feseR to narrow down the genelist.
+4. Generate RFmodels based on feseR-restricted genesets
+5. Check accuracy in fetal vs adult
+6. Score Cord
+
+```{r}
+DefaultAssay(HSPCs) <- "RNA"
+```
+
+### HSC/MPPs:
+
+```{r}
+set.seed(190813)
+
+### 0. Set ident to age, but 0 for non-MPP cluster
+AGE.MPP <- meta("age")
+AGE.MPP[meta("trajectory_calls")!="HSC/MPP"] <- 0
+Idents(HSPCs) <- AGE.MPP
+# dittoDimPlot(cells.use = Idents(HSPCs)!=0)
+
+### 1. Pick half equalized training group based around 30%
+Ad.percent.of.FeAd <- sum(meta("ident")=="adult")/sum(meta("ident")%in%c("fetal", "adult"))
+Fe.percent.of.FeAd <- 1-Ad.percent.of.FeAd
+inTraining1 <- createDataPartition(Idents(HSPCs), p=0.3*(Fe.percent.of.FeAd+0.5), list = FALSE)
+inTraining2 <- createDataPartition(Idents(HSPCs), p=0.3*(Ad.percent.of.FeAd+0.5), list = FALSE)
+#Trim to adult and fetal indices
+inTraining <- c(inTraining1[Idents(HSPCs)[inTraining1]%in%c("adult")],
+                inTraining2[Idents(HSPCs)[inTraining2]%in%c("fetal")])
+sum(meta("age")[inTraining]=="adult")/sum(meta("age")[inTraining]%in%c("fetal", "adult"))
+sum(meta("ident")=="adult")/sum(meta("ident")%in%c("fetal", "adult"))
+
+### 2. Obtain markers
+# Set Idents to 0 for non-training cells
+AGE.MPP.inTrain <- meta("age")
+AGE.MPP.inTrain[-inTraining] <- 0
+# table(AGE.MPP.inTrain, inTraining, meta("trajectory_calls")
+Idents(HSPCs) <- AGE.MPP.inTrain
+# Obtain markers
+FvA.MPP <- FindMarkers(HSPCs,
+                       ident.1 = "fetal",
+                       ident.2 = "adult",
+                       test.use = "MAST")
+FvA.MPP_padjFC <- FvA.MPP[abs(FvA.MPP$avg_logFC)>=(log2(1.5)) &
+                            FvA.MPP$p_val_adj<0.05 &
+                            !(is.na(FvA.MPP$p_val_adj)),]
+markers.MPP <- rownames(FvA.MPP_padjFC)
+
+### 3. Run FESER to recursively eliminate features
+#Grab data
+training <- as.matrix(t(GetAssayData(HSPCs)[markers.MPP,inTraining]))
+# Creating the outcome score values
+Train_val <- array(1, length(inTraining))
+Train_val[meta("age")[inTraining]=="fetal"] <- 0
+#Run feseR correlation step
+training.trim <- filter.corr(scale(training), Train_val, mincorr = 0.3)
+#Run feseR random forest step
+feserMPP = rfeRF(
+  features = training.trim,
+  class = Train_val,
+  number.cv = 10,
+  group.sizes = seq_len(ncol(training.trim)),
+  metric = "ROC",
+  verbose = FALSE)
+#Explore feseR results
+feserMPP$results
+#Pick optimal feser variables
+markers.MPP.feser <- feserMPP$optVariables
+
+### 4. Generate Preliminary RF models
+#Grab data
+training <- as.matrix(t(GetAssayData(HSPCs)[markers.MPP.feser,inTraining]))
+# Creating the outcome score values
+Train_val <- array(1, length(inTraining))
+Train_val[meta("age")[inTraining]=="fetal"] <- 0
+# Make the model
+rf_mod_MPP <- train(Train_val ~ .,
+              set.seed(998),
+              data= cbind(training,Train_val),
+              method = "ranger",
+              metric = "MAE",
+              trControl = trainControl(method = "cv",
+                                       number = 3,
+                                       repeats = 3),
+              tuneGrid = expand.grid(mtry = round(length(markers.MPP.feser)*.75,0),
+                                     splitrule = c("extratrees"),
+                                     min.node.size = 1)
+              )
+
+### 5. Score all
+HSPCs@meta.data$MPP.RFScore <- as.double(predict(rf_mod_MPP,t(GetAssayData(HSPCs)[markers.MPP,])))
+HSPCs@meta.data$MPP.inTraining <- FALSE
+HSPCs@meta.data$MPP.inTraining[inTraining] <- TRUE
+
+### 6. Score FvA accuracy
+nonTrain_FetalAdult_HSCMPP <- !(meta("MPP.inTraining")) & meta("age")!="cord" &
+  meta("trajectory_calls")=="HSC/MPP"
+roc_obj <- roc(response = 
+                 as.numeric(meta("age")=="adult")[nonTrain_FetalAdult_HSCMPP],
+               predictor = meta("MPP.RFScore")[nonTrain_FetalAdult_HSCMPP],
+               plot = T)
+auc(roc_obj)
+
+### Checking plots
+# # In training cells
+# dittoPlot("MPP.RFScore", cells.use = meta("trajectory_calls")=="HSC/MPP" & meta("MPP.inTraining"),
+#        group.by = "Sample", color.by = "age",
+#        plots = c("vlnplot","jitter","boxplot"),
+#        boxplot.color = "white", boxplot.fill = F,
+#        vlnplot.lineweight = 0.3, vlnplot.width = 3,
+#        sub = "inTraining", colors = c(1,3))
+# # Non-training cells
+# dittoPlot("MPP.RFScore", cells.use = meta("trajectory_calls")=="HSC/MPP" & !(meta("MPP.inTraining")),
+#        group.by = "Sample", color.by = "age",
+#        plots = c("vlnplot","jitter","boxplot"),
+#        boxplot.color = "white", boxplot.fill = F,
+#        vlnplot.lineweight = 0.3, vlnplot.width = 3,
+#        sub = "NOT in training")
+# dittoDimPlot("MPP.RFScore", cells.use = meta("trajectory_calls")=="HSC/MPP" & !(meta("MPP.inTraining")),
+#              sub = "NOT in training", size = 2)
+
+### Main plot output
+pdf("HSPCs-Figs/HSPCs_Age-score_HscMpp.pdf", w=3.5, h=2.5)
+dittoPlot("MPP.RFScore", group.by = "Sample", color.by = "age",
+       cells.use = meta("trajectory_calls")=="HSC/MPP" &
+                   !meta("MPP.inTraining"),
+       plots = c("jitter", "vlnplot", "boxplot"),
+       x.reorder = c(3:5,6,7,1,2),
+       boxplot.color = "white", boxplot.fill = FALSE, boxplot.width = 0.075,
+       x.labels = c(paste0("Fetal-",1:3),
+                  paste0("UCB-",1:2),
+                  paste0("Adult-",1:2)),
+       ylab = "Immunological Age Score",
+       main = "HSC/MPP Annotated Cells",
+       y.breaks = seq(0,1,0.5),
+       jitter.size = 0.5,
+       vlnplot.lineweight = 0.5,
+       vlnplot.width = 1.5,
+       legend.show = FALSE,
+       xlab = NULL
+       )
+dev.off()
+```
+
+### MEPs
+
+```{r}
+set.seed(190813)
+
+### 0. Set ident to age, but 0 for non-MEP cluster
+AGE.MEP <- meta("age")
+AGE.MEP[meta("trajectory_calls")!="MEP"] <- 0
+Idents(HSPCs) <- AGE.MEP
+# dittoDimPlot(cells.use = Idents(HSPCs)!=0)
+
+### 1. Pick half equalized training group based around 30%
+Ad.percent.of.FeAd <- sum(meta("ident")=="adult")/sum(meta("ident")%in%c("fetal", "adult"))
+Fe.percent.of.FeAd <- 1-Ad.percent.of.FeAd
+inTraining1 <- createDataPartition(Idents(HSPCs), p=0.3*(Fe.percent.of.FeAd+0.5), list = FALSE)
+inTraining2 <- createDataPartition(Idents(HSPCs), p=0.3*(Ad.percent.of.FeAd+0.5), list = FALSE)
+#Trim to adult and fetal indices
+inTraining <- c(inTraining1[Idents(HSPCs)[inTraining1]%in%c("adult")],
+                inTraining2[Idents(HSPCs)[inTraining2]%in%c("fetal")])
+sum(meta("age")[inTraining]=="adult")/sum(meta("age")[inTraining]%in%c("fetal", "adult"))
+sum(meta("ident")=="adult")/sum(meta("ident")%in%c("fetal", "adult"))
+
+### 2. Obtain markers
+# Set Idents to 0 for non-training cells
+AGE.MEP.inTrain <- meta("age")
+AGE.MEP.inTrain[-inTraining] <- 0
+# table(AGE.MPP.inTrain, inTraining, meta("trajectory_calls")
+Idents(HSPCs) <- AGE.MEP.inTrain
+# Obtain markers
+FvA.MEP <- FindMarkers(HSPCs,
+                       ident.1 = "fetal",
+                       ident.2 = "adult",
+                       test.use = "MAST")
+FvA.MEP_padjFC <- FvA.MEP[abs(FvA.MEP$avg_logFC)>=(log2(1.5)) &
+                            FvA.MEP$p_val_adj<0.05 &
+                            !(is.na(FvA.MEP$p_val_adj)),]
+markers.MEP <- rownames(FvA.MEP_padjFC)
+
+### 3. Run FESER to recursively eliminate features
+#Grab data
+training <- as.matrix(t(GetAssayData(HSPCs)[markers.MEP,inTraining]))
+# Creating the outcome score values
+Train_val <- array(1, length(inTraining))
+Train_val[meta("age")[inTraining]=="fetal"] <- 0
+#Run feseR correlation step
+training.trim <- filter.corr(scale(training), Train_val, mincorr = 0.3)
+#Run feseR random forest step
+feserMEP <- rfeRF(
+  features = training.trim,
+  class = Train_val,
+  number.cv = 10,
+  group.sizes = seq_len(ncol(training.trim)),
+  metric = "ROC",
+  verbose = FALSE)
+#Explore feseR results
+feserMEP$results
+#Pick optimal feser variables
+markers.MEP.feser <- feserMEP$optVariables
+
+### 4. Generate Preliminary RF models
+#Grab data
+training <- as.matrix(t(GetAssayData(HSPCs)[markers.MEP.feser,inTraining]))
+# Creating the outcome score values
+Train_val <- array(1, length(inTraining))
+Train_val[meta("age")[inTraining]=="fetal"] <- 0
+# Make the model
+rf_mod_MEP <- train(Train_val ~ .,
+              set.seed(998),
+              data= cbind(training,Train_val),
+              method = "ranger",
+              metric = "MAE",
+              trControl = trainControl(method = "cv",
+                                       number = 3,
+                                       repeats = 3),
+              tuneGrid = expand.grid(mtry = round(length(markers.MEP.feser)*.75,0),
+                                     splitrule = c("extratrees"),
+                                     min.node.size = 1)
+              )
+
+### 5. Score all
+HSPCs@meta.data$MEP.RFScore <- as.double(predict(rf_mod_MEP,t(GetAssayData(HSPCs)[markers.MEP,])))
+HSPCs@meta.data$MEP.inTraining <- FALSE
+HSPCs@meta.data$MEP.inTraining[inTraining] <- TRUE
+### 6. Score FvA accuracy
+nonTrain_FetalAdult_MEP <- !(meta("MEP.inTraining")) & meta("age")!="cord" &
+  meta("trajectory_calls")=="MEP"
+roc_obj <- roc(response = 
+                 as.numeric(meta("age")=="adult")[nonTrain_FetalAdult_MEP],
+               predictor = meta("MPP.RFScore")[nonTrain_FetalAdult_MEP],
+               plot = T)
+auc(roc_obj)
+
+### Check plots
+# # In training cells
+# dittoPlot("MEP.RFScore", cells.use = meta("trajectory_calls")=="MEP" & meta("MEP.inTraining"),
+#        group.by = "Sample", color.by = "age",
+#        plots = c("vlnplot","jitter","boxplot"),
+#        boxplot.color = "white", boxplot.fill = F,
+#        vlnplot.lineweight = 0.3, vlnplot.width = 2,
+#        sub = "inTraining")
+# # Non-training cells
+# dittoPlot("MEP.RFScore", cells.use = meta("trajectory_calls")=="MEP" & !(meta("MEP.inTraining")),
+#        group.by = "Sample", color.by = "age",
+#        plots = c("vlnplot","jitter","boxplot"),
+#        boxplot.color = "white", boxplot.fill = F,
+#        vlnplot.lineweight = 0.3, vlnplot.width = 2,
+#        sub = "NOT in training")
+# dittoDimPlot("MEP.RFScore", cells.use = meta("trajectory_calls")=="MEP" & !(meta("MEP.inTraining")),
+#              sub = "NOT in training", size = 2)
+
+### Main plot output
+pdf("HSPCs-Figs/HSPCs_Age-score_MEP.pdf", w=3.5, h=2.5)
+dittoPlot("MEP.RFScore", group.by = "Sample", color.by = "age",
+              cells.use = meta("trajectory_calls")=="MEP" &
+                   !meta("MEP.inTraining"),
+       plots = c("jitter", "vlnplot", "boxplot"),
+       x.reorder = c(3:5,6,7,1,2),
+       boxplot.color = "white", boxplot.fill = FALSE, boxplot.width = 0.075,
+       x.labels = c(paste0("Fetal-",1:3),
+                  paste0("UCB-",1:2),
+                  paste0("Adult-",1:2)),
+       ylab = "Immunological Age Score",
+       main = "MEP Annotated Cells",
+       y.breaks = seq(0,1,0.5),
+       jitter.size = 0.5,
+       vlnplot.lineweight = 0.5,
+       vlnplot.width = 1.5,
+       legend.show = FALSE,
+       xlab = NULL
+       )
+dev.off()
+```
+
+### GMPs
+
+```{r}
+set.seed(190813)
+
+### 0. Set ident to age, but 0 for non-GMP cluster
+AGE.GMP <- meta("age")
+AGE.GMP[meta("trajectory_calls")!="GMP"] <- 0
+Idents(HSPCs) <- AGE.GMP
+# dittoDimPlot(cells.use = Idents(HSPCs)!=0)
+
+### 1. Pick half equalized training group based around 30%
+Ad.percent.of.FeAd <- sum(meta("ident")=="adult")/sum(meta("ident")%in%c("fetal", "adult"))
+Fe.percent.of.FeAd <- 1-Ad.percent.of.FeAd
+inTraining1 <- createDataPartition(Idents(HSPCs), p=0.3*(Fe.percent.of.FeAd+0.5), list = FALSE)
+inTraining2 <- createDataPartition(Idents(HSPCs), p=0.3*(Ad.percent.of.FeAd+0.5), list = FALSE)
+#Trim to adult and fetal indices
+inTraining <- c(inTraining1[Idents(HSPCs)[inTraining1]%in%c("adult")],
+                inTraining2[Idents(HSPCs)[inTraining2]%in%c("fetal")])
+sum(meta("age")[inTraining]=="adult")/sum(meta("age")[inTraining]%in%c("fetal", "adult"))
+sum(meta("ident")=="adult")/sum(meta("ident")%in%c("fetal", "adult"))
+
+### 2. Obtain markers
+# Set Idents to 0 for non-training cells
+AGE.GMP.inTrain <- meta("age")
+AGE.GMP.inTrain[-inTraining] <- 0
+# table(AGE.MPP.inTrain, inTraining, meta("trajectory_calls")
+Idents(HSPCs) <- AGE.GMP.inTrain
+# Obtain markers
+FvA.GMP <- FindMarkers(HSPCs,
+                       ident.1 = "fetal",
+                       ident.2 = "adult",
+                       test.use = "MAST")
+FvA.GMP_padjFC <- FvA.GMP[abs(FvA.GMP$avg_logFC)>=(log2(1.5)) &
+                            FvA.GMP$p_val_adj<0.05 &
+                            !(is.na(FvA.GMP$p_val_adj)),]
+markers.GMP <- rownames(FvA.GMP_padjFC)
+
+### 3. Run FESER to recursively eliminate features
+#Grab data
+training <- as.matrix(t(GetAssayData(HSPCs)[markers.GMP,inTraining]))
+# Creating the outcome score values
+Train_val <- array(1, length(inTraining))
+Train_val[meta("age")[inTraining]=="fetal"] <- 0
+#Run feseR correlation step
+training.trim <- filter.corr(scale(training), Train_val, mincorr = 0.3)
+#Run feseR random forest step
+feserGMP <- rfeRF(
+  features = training.trim,
+  class = Train_val,
+  number.cv = 10,
+  group.sizes = seq_len(ncol(training.trim)),
+  metric = "ROC",
+  verbose = FALSE)
+#Explore feseR results
+feserGMP$results
+#Pick optimal feser variables
+markers.GMP.feser <- feserGMP$optVariables
+
+### 4. Generate Preliminary RF models
+#Grab data
+training <- as.matrix(t(GetAssayData(HSPCs)[markers.GMP.feser,inTraining]))
+# Creating the outcome score values
+Train_val <- array(1, length(inTraining))
+Train_val[meta("age")[inTraining]=="fetal"] <- 0
+# Make the model
+rf_mod_GMP <- train(Train_val ~ .,
+              set.seed(998),
+              data= cbind(training,Train_val),
+              method = "ranger",
+              metric = "MAE",
+              trControl = trainControl(method = "cv",
+                                       number = 3,
+                                       repeats = 3),
+              tuneGrid = expand.grid(mtry = round(length(markers.GMP.feser)*.75,0),
+                                     splitrule = c("extratrees"),
+                                     min.node.size = 1)
+              )
+
+### 5. Score all
+HSPCs@meta.data$GMP.RFScore <- as.double(predict(rf_mod_GMP,t(GetAssayData(HSPCs)[markers.GMP,])))
+HSPCs@meta.data$GMP.inTraining <- FALSE
+HSPCs@meta.data$GMP.inTraining[inTraining] <- TRUE
+### 6. Score FvA accuracy
+nonTrain_FetalAdult_GMP <- !(meta("GMP.inTraining")) & meta("age")!="cord" &
+  meta("trajectory_calls")=="GMP"
+roc_obj <- roc(response = 
+                 as.numeric(meta("age")=="adult")[nonTrain_FetalAdult_GMP],
+               predictor = meta("MPP.RFScore")[nonTrain_FetalAdult_GMP],
+               plot = T)
+auc(roc_obj)
+
+### Check plots
+# # In training cells
+# dittoPlot("GMP.RFScore", cells.use = meta("trajectory_calls")=="GMP" & meta("GMP.inTraining"),
+#        group.by = "Sample", color.by = "age",
+#        plots = c("vlnplot","jitter","boxplot"),
+#        boxplot.color = "white", boxplot.fill = F,
+#        vlnplot.lineweight = 0.3, vlnplot.width = 2,
+#        sub = "inTraining")
+# # Non-training cells
+# dittoPlot("GMP.RFScore", cells.use = meta("trajectory_calls")=="GMP" & !(meta("GMP.inTraining")),
+#        group.by = "Sample", color.by = "age",
+#        plots = c("vlnplot","jitter","boxplot"),
+#        boxplot.color = "white", boxplot.fill = F,
+#        vlnplot.lineweight = 0.3, vlnplot.width = 2,
+#        sub = "NOT in training")
+# dittoDimPlot("GMP.RFScore", cells.use = meta("trajectory_calls")=="GMP" & !(meta("GMP.inTraining")),
+#              sub = "NOT in training", size = 2)
+
+### Main plot output
+pdf("HSPCs-Figs/HSPCs_Age-score_GMP.pdf", w=3.5, h=2.5)
+dittoPlot("GMP.RFScore", group.by = "Sample", color.by = "age",
+              cells.use = meta("trajectory_calls")=="GMP" &
+                   !meta("GMP.inTraining"),
+       plots = c("jitter", "vlnplot", "boxplot"),
+       x.reorder = c(3:5,6,7,1,2),
+       boxplot.color = "white", boxplot.fill = FALSE, boxplot.width = 0.075,
+       x.labels = c(paste0("Fetal-",1:3),
+                  paste0("UCB-",1:2),
+                  paste0("Adult-",1:2)),
+       ylab = "Immunological Age Score",
+       main = "GMP Annotated Cells",
+       y.breaks = seq(0,1,0.5),
+       jitter.size = 0.5,
+       vlnplot.lineweight = 0.5,
+       vlnplot.width = 1.5,
+       legend.show = FALSE,
+       xlab = NULL
+       )
+dev.off()
+```
+
+### Statistical analysis of Immunological Age Scores
+
+```{r}
+# HSC/MPP
+wilcox.test(meta("MPP.RFScore")[meta("age")=="fetal" & !meta("MPP.inTraining") & meta("trajectory_calls")=="HSC/MPP"],
+            meta("MPP.RFScore")[meta("age")=="cord" & meta("trajectory_calls")=="HSC/MPP"])
+wilcox.test(meta("MPP.RFScore")[meta("age")=="adult" & !meta("MPP.inTraining") & meta("trajectory_calls")=="HSC/MPP"],
+            meta("MPP.RFScore")[meta("age")=="cord" & meta("trajectory_calls")=="HSC/MPP"])
+```
+
+```{r}
+# MEP
+wilcox.test(meta("MEP.RFScore")[meta("age")=="fetal" & !meta("MEP.inTraining") & meta("trajectory_calls")=="MEP"],
+            meta("MEP.RFScore")[meta("age")=="cord" & meta("trajectory_calls")=="MEP"])
+wilcox.test(meta("MEP.RFScore")[meta("age")=="adult" & !meta("MEP.inTraining") & meta("trajectory_calls")=="MEP"],
+            meta("MEP.RFScore")[meta("age")=="cord" & meta("trajectory_calls")=="MEP"])
+```
+
+```{r}
+# GMP
+wilcox.test(meta("GMP.RFScore")[meta("age")=="fetal" & !meta("GMP.inTraining") & meta("trajectory_calls")=="GMP"],
+            meta("GMP.RFScore")[meta("age")=="cord" & meta("trajectory_calls")=="GMP"])
+wilcox.test(meta("GMP.RFScore")[meta("age")=="adult" & !meta("GMP.inTraining") & meta("trajectory_calls")=="GMP"],
+            meta("GMP.RFScore")[meta("age")=="cord" & meta("trajectory_calls")=="GMP"])
+```
+
+Fetal vs UCB and UCB vs Adult are statistically significantly different for all cell types analyzed.
+
+# 8. Save
+
+```{r}
+saveRDS(HSPCs, file = "HSPCs.rds")
+```
+
+
+
+
+
+
+
+
+
+
+

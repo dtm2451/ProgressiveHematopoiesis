@@ -1,0 +1,1075 @@
+---
+title: "Naive CD4 T cell & classical monocyte microarray and qRT-PCR analysis"
+author: "Dan Bunis"
+date: "2/26/2020"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plyr)
+library(reshape2)
+library(ggplot2)
+library(ggrepel)
+library(limma)
+library(dittoSeq) # For its colors
+library(GEOquery)
+```
+
+First, some functions
+```{r}
+mydistfunPearson = function(x) {
+t.dist = 1 - cor(t(x), use="pairwise")
+t.limit <- 1.1*max(t.dist,na.rm=TRUE)
+t.dist[is.na(t.dist)] = t.limit
+t.dist = as.dist(t.dist)
+return(t.dist)
+}
+
+mydistfunEuc = function(x) {
+t.dist = dist(x)
+t.limit <- 1.1*max(t.dist,na.rm=TRUE)
+t.dist[is.na(t.dist)] = t.limit
+return(t.dist)
+}
+
+outliersNA <- function(x,p) {
+  z <- (x-mean(x,na.rm=TRUE)) / sd(x,na.rm=TRUE)
+  rm.index <- which( pnorm(abs(z), lower.tail=FALSE) < p)
+  x[rm.index] <- NA
+  return(x)
+}
+
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+                      conf.interval=.95, .drop=TRUE) {
+  ##############################################
+  ### Function obtained on July 20, 2019, from:
+  # http://www.cookbook-r.com/Graphs/Plotting_means_and_error_bars_(ggplot2)/
+  ##############################################
+  
+  ## Gives count, mean, standard deviation, standard error of the mean, and
+  ## confidence interval (default 95%).
+  ##   data: a data frame.
+  ##   measurevar: the name of a column that contains the variable to be summariezed
+  ##   groupvars: a vector containing names of columns that contain grouping variables
+  ##   na.rm: a boolean that indicates whether to ignore NA's
+  ##   conf.interval: the percent range of the confidence interval (default is 95%)
+  library(plyr)
+  
+  # New version of length which can handle NA's: if na.rm==T, don't count them
+  length2 <- function (x, na.rm=FALSE) {
+    if (na.rm) sum(!is.na(x))
+    else       length(x)
+  }
+  
+  # This does the summary. For each group's data frame, return a vector with
+  # N, mean, and sd
+  datac <- ddply(data, groupvars, .drop=.drop,
+                 .fun = function(xx, col) {
+                   c(N    = length2(xx[[col]], na.rm=na.rm),
+                     mean = mean   (xx[[col]], na.rm=na.rm),
+                     sd   = sd     (xx[[col]], na.rm=na.rm)
+                   )
+                 },
+                 measurevar
+  )
+  
+  # Rename the "mean" column    
+  datac <- rename(datac, c("mean" = measurevar))
+  
+  datac$se <- datac$sd / sqrt(datac$N)  # Calculate standard error of the mean
+  
+  # Confidence interval multiplier for standard error
+  # Calculate t-statistic for confidence interval: 
+  # e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+  ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+  datac$ci <- datac$se * ciMult
+  
+  return(datac)
+}
+```
+
+# 1. Check for outliers & run differential expression on microarrays
+
+## T cells first
+
+### 0) Load in the data and get started
+
+```{r}
+# Load most raw form and median scale
+cluster1=read.csv("Microarray_annotatedData/17_medGen_longAnn_Tcells.csv", header=T,row.names = 1,check.names=FALSE)
+```
+
+### 1) Check for outliers:
+
+```{r}
+#### CLUSTER FPB AND APB - T cells
+cluster2=cluster1[,c(4:13)]
+distance = dist(t(cluster2), method="euclidean")
+hc <- hclust(distance, method="average")
+plot(hc, main = "Cluster Dendrogram", ylab="Height", xlab =NULL)
+```
+
+Fetal peripheral blood #5 clusters on its own here and in the monocytes analysis.
+
+Differential Expression was run then for T cells (and monocytes) without FPB#5.
+
+### 2) Select best probes (highest interquartile range) for genes with multiple.
+
+```{r}
+cluster2=cluster1[,c(1,2,4:13)]
+cluster2$NAME = sapply(as.character(cluster2$NAME),function(x) strsplit(x," ")[[1]][1])
+
+# pick the most variable probe for each replicated gene
+replicated = unique(cluster2$NAME[duplicated(cluster2$NAME)])
+# separate data into replicated genes or not (to speed operations on replicated data)
+repdata = cluster2[cluster2$NAME %in% replicated,]
+norepdata = cluster2[!cluster2$NAME %in% replicated,]
+# reduce replicated genes data frame to most variable probe
+temp = melt(repdata,id.vars = c("UNIQID","NAME"))
+temp = ddply(temp,.(NAME,UNIQID),summarize,iqr=IQR(value))
+temp = temp[order(temp$NAME,temp$iqr,decreasing=TRUE),]
+temp = temp[!duplicated(temp$NAME),]
+repdata$bestprobe = temp$UNIQID[match(repdata$NAME,temp$NAME)]
+repdata = repdata[repdata$bestprobe==repdata$UNIQID,]
+# re-combine the replicated and non-replicated
+cluster2 = rbind(norepdata,repdata[,-which(names(repdata)=="bestprobe")])
+```
+
+### 3) Find genes that differentiate between APB and FPB
+
+```{r}
+cluster3 = cluster2
+# Set rownames to the genes
+rownames(cluster3) = cluster3$NAME
+cluster3 = cluster3[,3:ncol(cluster3)]
+# Remove outlier fetal sample
+dedata = cluster3[,-which(names(cluster3)=="5FPBT#5")]
+# Create a group variable to hold the age classifier of samples
+group = rep("FPB",dim(dedata)[2])
+group[grep("APB",names(dedata))] = "APB"
+group = factor(group,levels=c("FPB","APB")) 
+# Perform differential expression with limma
+design=model.matrix(~group)
+fit=lmFit(dedata,design)
+fit=eBayes(fit)
+topgenes = topTable(fit,
+                    coef=2,
+                    adjust.method="BH",
+                    n=Inf)
+topgenes <- topgenes[abs(topgenes$logFC)>log2(1.5) & topgenes$adj.P.Val<0.05,]
+# Export DE table and the data that went in to it
+write.csv(topgenes,
+          file = "Microarray_APBvsFPBTcells_FDR0.05_FC1.5_LongAnn.csv",
+          row.names=TRUE,
+          quote=FALSE)
+save(dedata, file = "Tcell_dedata.rda")
+
+# Store this topgenes table for later.
+topgenes_T <- topgenes
+```
+
+## Monocytes second
+
+### 0) Load in the data and get started
+
+```{r}
+# Load most raw form and median scale
+cluster1=read.csv("Microarray_annotatedData/17_medGen_longAnn_Mono.csv", header=T,row.names = 1,check.names=FALSE)
+```
+
+### 1) Check for outliers:
+
+```{r}
+#### CLUSTER FPB AND APB -  cells
+cluster2=cluster1[,c(4:13)]
+distance = dist(t(cluster2), method="euclidean")
+hc <- hclust(distance, method="average")
+plot(hc, main = "Cluster Dendrogram", ylab="Height", xlab =NULL)
+```
+
+Fetal peripheral blood #5 clusters on its own here and in the T cell analysis.
+
+Additionally, APB#1 and APB#5 cluster with the fetal samples.  These differences are investigated in step 3.
+
+### 2) Select best probes (highest interquartile range) for genes with multiple.
+
+```{r}
+cluster2=cluster1[,c(1,2,4:13)]
+cluster2$NAME = sapply(as.character(cluster2$NAME),function(x) strsplit(x," ")[[1]][1])
+
+# pick the most variable probe for each replicated gene
+replicated = unique(cluster2$NAME[duplicated(cluster2$NAME)])
+# separate data into replicated genes or not (to speed operations on replicated data)
+repdata = cluster2[cluster2$NAME %in% replicated,]
+norepdata = cluster2[!cluster2$NAME %in% replicated,]
+# reduce replicated genes data frame to most variable probe
+temp = melt(repdata,id.vars = c("UNIQID","NAME"))
+temp = ddply(temp,.(NAME,UNIQID),summarize,iqr=IQR(value))
+temp = temp[order(temp$NAME,temp$iqr,decreasing=TRUE),]
+temp = temp[!duplicated(temp$NAME),]
+repdata$bestprobe = temp$UNIQID[match(repdata$NAME,temp$NAME)]
+repdata = repdata[repdata$bestprobe==repdata$UNIQID,]
+# re-combine the replicated and non-replicated
+cluster2 = rbind(norepdata,repdata[,-which(names(repdata)=="bestprobe")])
+```
+
+### 3) Investigate Adult samples that cluster with fetal samples
+
+```{r}
+cluster3 = cluster2
+# Set rownames to the genes
+rownames(cluster3) = cluster3$NAME
+cluster3 = cluster3[,3:dim(cluster3)[2]]
+# Remove outlier fetal sample
+dedata = cluster3[,grep("APB",names(cluster3))]
+# Create a group variable to hold the age classifier of samples
+group = rep(1,dim(dedata)[2])
+group[names(dedata) %in% c("2APBmono#5","2APBmono#1")] = 2 
+# Perform differential expression with limma
+design=model.matrix(~group)
+fit=lmFit(dedata,design)
+fit=eBayes(fit)
+topgenes = topTable(fit,
+                    coef=2,
+                    adjust.method="BH",
+                    p.value=0.05,
+                    sort.by="p",
+                    resort.by='t',
+                    n=100000)
+write.csv(topgenes,
+          "Microarray_APB_monocyte_Heterogeneity_FDR0.05_noprefilter_IPA_sortbyttest.csv",
+          row.names=TRUE,
+          quote=FALSE)
+```
+
+These genes were used for external pathway analysis which returned pathways, provided in the text, which idicated these samples might have had a viral infection ast the time. The T cell samples were less affected, so these samples were only removed from the monocyte differential expression analysis.  Note: these adult samples were brought back later in training of the bulk immunological age score model.
+
+Differential Expression was run then for monocytes without APB#1, APB#5, and FPB#5.
+
+### 4) Find genes that differentiate between APB and FPB
+
+```{r}
+cluster3 = cluster2
+# Set rownames to the genes
+rownames(cluster3) = cluster3$NAME
+cluster3 = cluster3[,3:ncol(cluster3)]
+# Remove outlier fetal sample
+dedata = cluster3[,-which(names(cluster3) %in% c("1FPBmono#5","2APBmono#5","2APBmono#1"))]
+# Create a group variable to hold the age classifier of samples
+group = rep("FPB",dim(dedata)[2])
+group[grep("APB",names(dedata))] = "APB"
+group = factor(group,levels=c("FPB","APB")) 
+# Perform differential expression with limma
+design=model.matrix(~group)
+fit=lmFit(dedata,design)
+fit=eBayes(fit)
+topgenes = topTable(fit,
+                    coef=2,
+                    adjust.method="BH",
+                    n=Inf)
+topgenes <- topgenes[abs(topgenes$logFC)>log2(1.5) & topgenes$adj.P.Val<0.05,]
+# Export DE table
+write.csv(topgenes,
+            file = "Microarray_APBvsFPBmonocytes_FDR0.05_FC1.5_LongAnn.csv",
+            row.names=TRUE,
+            quote=FALSE)
+# Store this topgenes table for later.
+topgenes_M <- topgenes
+
+# Export the DEdata with only FPB#5 removed for immunological age score model generation later.
+dedata = cluster3[,-which(names(cluster3) %in% c("1FPBmono#5"))]
+save(dedata, file = "Monocyte_dedata.rda")
+```
+
+# 2. Extract broad fetal versus adult gene signature (Intersect the T and monocyte DE genes)
+
+This is for potential immunological age score marker selection
+
+```{r}
+full_Adult <- intersect(rownames(topgenes_T[topgenes_T$logFC>0,]),
+                        rownames(topgenes_M[topgenes_M$logFC>0,]))
+full_Fetal <- intersect(rownames(topgenes_T[topgenes_T$logFC<0,]),
+                        rownames(topgenes_M[topgenes_M$logFC<0,]))
+full <- c(full_Adult, full_Fetal)
+(filtered <- full[-grep("^XLOC|^LOC|^ENST|ORF|orf|A_19|A_33|A_24", full)])
+```
+
+A subset of these genes were validated by qRT-PCR and then used to score additional samples without the need for full microarray analysis.
+
+# 3. Calculate Immunological Age Scores for initial UCSF(SLVR) UCB cohort & controls
+
+## 1) Read in qPCR data & pre-process
+
+### 1. Clean it up
+
+```{r}
+chiptMay = read.csv("qRTPCR_data/140527tcell.csv",
+                    na.strings = c("NA", "","999"), skip=31, stringsAsFactors = FALSE)
+chiptMay$run = "may"
+chipmMay = read.csv("qRTPCR_data/140528monoresultsLegit.csv",
+                    na.strings = c("NA", "","999"), skip=31, stringsAsFactors = FALSE)
+chipmMay = chipmMay[,-which(names(chipmMay)=="Comments")]
+chipmMay$run = "may"
+chipmMay$Name = sub("M$","Mono",chipmMay$Name)
+
+chiptMarch = read.csv("qRTPCR_data/140304 T cell layering.csv",
+                      na.strings = c("NA", ""), skip=11, stringsAsFactors = FALSE)
+chiptMarch = chiptMarch[,!names(chiptMarch) %in% c("In.Range","Out.Range","Peak.Ratio")]
+chiptMarch$run = "march"
+chipmMarch = read.csv("qRTPCR_data/140304 Mono layering.csv",
+                      na.strings = c("NA", ""), skip=11, stringsAsFactors = FALSE)
+chipmMarch = chipmMarch[,!names(chipmMarch) %in% c("In.Range","Out.Range","Peak.Ratio")]
+chipmMarch$run = "march"
+
+d = rbind(chiptMay,chiptMarch,chipmMay,chipmMarch)
+
+names(d)[names(d)=="Name"] = "sample"
+names(d)[names(d)=="Name.1"] = "gene"
+names(d)[names(d)=="Value"] = "ct"
+
+# get rid of whitespace in gene names
+d$gene = gsub(" ","",d$gene)
+
+# get rid of unused sample or assay inlets
+d = d[d$sample != "BLANK" & d$gene != "BLANK" & !is.na(d$gene) & !is.na(d$sample),]
+
+# SLVR035 in May should be labeled SLVR135
+d$sample[d$run=="may"] = sub("SLVR035","SLVR135",d$sample[d$run=="may"])
+
+# expand sample pheno data
+d$id = sapply(d$sample,function (x) strsplit(x,".",fixed=TRUE)[[1]][1])
+d$rep = as.numeric(sapply(d$sample,function (x) strsplit(x,".",fixed=TRUE)[[1]][2]))
+d$cell = sapply(d$sample,function (x) strsplit(x,".",fixed=TRUE)[[1]][3])
+```
+
+### 2. Filter ct data (simply set to NA)
+
+```{r}
+d$ct[d$Quality<0.5] = NA
+# Across all genes, any Ct > pre-specified cutoff (e.g. 28), is assigned NA.
+d$ct[d$ct>27] = NA
+```
+
+### 3. Trim down to just the signature genes
+
+```{r}
+siggenes <- as.character(t(read.csv("qRTPCR_data/Signature_Genes.csv")))
+d = d[d$gene %in% siggenes,]
+```
+
+### 4. Trim samples with fewer than 3 successful replicates
+
+```{r}
+### Trim replicates (greater than 80% failed reactions)
+
+# remove shared samples and ctrl samples from may run
+d = d[-which(grepl("ctrl|SLVR022|SLVR031|SLVR135",d$sample) & d$run=="may"),]
+
+# identify likely bad replicates by fraction failed
+d = ddply(d,.(sample,cell,run),transform,remove = sum(is.na(ct))/length(ct)>=0.8)
+
+# list s that will be removed
+unique(paste(d$sample[d$remove],d$run[d$remove]))
+ddply(d[d$remove,],.(id,cell,run),summarize,number.reps = length(unique(rep)))
+ddply(d[d$remove,],.(id,cell,rep),summarize,fraction.failed = sum(is.na(ct))/length(ct))
+
+# remove likely bad runs by fraction failed
+if (sum(d$remove)>0){
+  d = d[-which(d$remove),]
+}
+
+# identify and remove samples that are outliers (outside 0.01 tails on a normal distribution when looking at data for a given gene and cell type, across all cords. Outside 0.01 tails means total of 2*0.01 = 0.02 or 2% of the data is removed, leaving 98%)
+d = ddply(d,.(cell,gene),transform,ctoutliersremoved = outliersNA(ct,0.01))
+d$ct = d$ctoutliersremoved
+```
+
+```{r}
+### Trim samples with fewer than 3 replicates
+# remove subjects entirely for a given cell type that don't have at least 3 wells of data
+d = ddply(d,.(id,cell,gene),transform,remove = length(unique(rep))<3)
+
+# list additional samples that will be removed
+unique(paste(d$id[d$remove]))
+
+# remove these additional samples
+if (sum(d$remove)>0) {
+  d = d[-which(d$remove),]
+}
+```
+
+### 5. Trim genes
+
+```{r}
+### get rid of likely bad genes with greater than 80% reactions failed
+d = ddply(d,.(gene,cell,run),transform,remove = sum(is.na(ct))/length(ct)>=0.8)
+# list genes that will be removed
+unique(paste(d$gene[d$remove],d$cell[d$remove],d$run[d$remove]))
+# remove these likely bad genes
+if (sum(d$remove)>0) {
+  d = d[-which(d$remove),]
+}
+```
+
+```{r}
+# remove genes that are now not shared across both runs within a given cell type
+d = ddply(d,.(gene,cell),transform,remove = length(unique(run))<2)
+# list genes that will be removed
+unique(paste(d$gene[d$remove],d$cell[d$remove]))
+# remove likely bad genes
+if (sum(d$remove)>0) {
+  d = d[-which(d$remove),]
+}
+```
+
+```{r}
+# get rid of genes that have average Ct > than a certain amount, here 25
+d = ddply(d,.(gene),transform,remove = mean(ct,na.rm=TRUE) > 25)
+# list genes that will be removed
+unique(paste(d$gene[d$remove],d$cell[d$remove]))
+if (sum(d$remove)>0) {
+  d = d[-which(d$remove),]
+}
+```
+
+### 6. Normalize between runs based on mean gene Ct values
+```{r}
+# compute gene-specific normalization factor, which is the mean of the samples across a run within a cell type
+d = ddply(d,.(gene,run,cell),transform,NF = mean(ct,na.rm=TRUE))
+# apply normalization
+d$ctnorm = d$ct - d$NF
+```
+
+### 7. Convert normalized ct to relative expression
+
+```{r}
+# On a per-gene-run-cell basis, take the highest observed Ct, add 0.1, and assign that to all NA reactions for that gene.
+d = ddply(d,.(gene,run,cell),transform,max = max(ctnorm,na.rm=TRUE))
+d$ctnorm[is.na(d$ctnorm)] = d$max[is.na(d$ctnorm)] + 0.1
+
+# Perform Transformation
+d$log2exp = -1*d$ctnorm
+d = ddply(d,.(gene),transform,log2exp.scaled = log2exp - min(log2exp,na.rm=TRUE))
+```
+
+## 2) Calculate scoring weights based on microarray PCA of signature genes suviving quality control
+
+### 1. Generate loadings for T cells
+
+```{r}
+# load array data in which most variable probe has been retained and 5FPB#5 already removed; the data is loaded into dedata
+load("Tcell_dedata.rda")
+dedata = dedata[,grep("FPB|APB",names(dedata))]
+
+# reduce array data to genes of interest
+dedata = dedata[rownames(dedata) %in% d$gene[d$cell=="T"],]
+
+# extract pheno data for pca plot
+group = rep("FPB",dim(dedata)[2])
+group[grep("APB",names(dedata))] = "APB"
+names(group) = names(dedata)
+pcdat = prcomp(x=t(dedata),scale.=TRUE)
+
+# get PC1 loadings to make signature
+Tsig = data.frame(pcdat$rotation[,1:2])[,1]
+names(Tsig) = rownames(data.frame(pcdat$rotation[,1:2]))
+
+# what % of variation in array data is explained by PC1
+(pcdat$sdev^2)[1]/sum(pcdat$sdev^2)
+```
+
+```{r}
+#Loadings
+Tsig
+```
+
+#### Plot the PCA (Figure S2)
+
+```{r, fig.width=2.33, fig.height = 2.4}
+# Gather data
+pc <- data.frame(
+  pcdat$x[,1:2],
+  group=group[match(rownames(pcdat$x),names(group))],
+  sample=rownames(pcdat$x))
+# get loadings
+loadings <- data.frame(pcdat$rotation[,1:2])
+# amplify loadings so we can see them on the plot
+loadings <- loadings * 30
+loadings$gene <- rownames(loadings)
+# Make a pretty plot
+(p = ggplot(data=pc,
+           aes(PC1, PC2)) +
+  geom_point(aes(fill=group),
+             color="black", size=3, shape = 21) +
+  scale_fill_manual(values=dittoColors()[c(1,3)]) +
+  geom_segment(data=loadings,
+               aes(x=0, y=0, xend=PC1, yend=PC2),
+               arrow=arrow(length=unit(0.2,"cm")),
+               alpha=0.25) +
+  geom_text_repel(data=loadings[loadings$PC1<0,],
+            direction = "both", xlim = c(NA, -7),
+            aes(x=PC1, y=PC2, label=gene, fontface = 2),
+            force = 5, seed = 3, min.segment.length = 0.05,
+            size=2, segment.size = 0.2,
+            box.padding = 0.02) +
+  geom_text_repel(data=loadings[loadings$PC1>0,],
+            direction = "both", xlim = c(7, NA),
+            aes(x=PC1, y=PC2, label=gene, fontface = 2),
+            force = 3, seed = 5, min.segment.length = 0.05,
+            size=2, segment.size = 0.2,
+            box.padding = 0.1) +
+  xlab(paste0("PC1 (",
+              round(100*(pcdat$sdev^2)[1]/sum(pcdat$sdev^2), digits = 1),
+              "%)")) +
+  ylab(paste0("PC2 (",
+              round(100*(pcdat$sdev^2)[2]/sum(pcdat$sdev^2), digits = 1),
+              "%)")) +
+  theme_bw() + ggtitle(NULL, subtitle = "T cells") +
+  theme(axis.title.x= element_text(size = 8),
+        axis.text.x= element_text(size = 8, face = "bold"),
+        axis.title.y= element_text(size = 8),
+        axis.text.y= element_text(size = 8),
+        plot.subtitle= element_text(size = 9)) +
+  coord_cartesian(clip = "off", xlim = c(-15,13)) +
+  theme(legend.position = "none"))
+# p = p + geom_text(aes(label=sample))
+pdf("Microarray-qPCR-Figs/PCA_T_Array.pdf", w = 2.33, h = 2.4)
+p
+dev.off()
+```
+
+#### Plot the loadings (Figure S2)
+
+```{r, fig.height=2.5, fig.width=1.5}
+Tdat <- data.frame(
+    weights = Tsig,
+    genes = factor(names(Tsig), levels = names(Tsig[order(Tsig)])),
+    sign = Tsig>0)
+(p <- ggplot(Tdat, aes(x = genes, y = weights, fill = sign)) +
+  geom_col(color = "black", width = 0.7) + coord_flip() + theme_classic() +
+  scale_fill_manual(values = c("blue3","red3"), guide = FALSE) +
+  geom_hline(yintercept = 0) +
+  scale_y_continuous(breaks = c(-0.2,0,0.2)) +
+  theme(axis.text.x= element_text(size = 7),
+        axis.text.y= element_text(size = 6),
+        axis.title.x= element_text(size = 7),
+        plot.title = element_text(size = 9)) +
+  xlab(NULL))
+pdf("Microarray-qPCR-Figs/Tsig_weights.pdf", w=1.5, h=2.5)
+p
+dev.off()
+```
+
+### 2. Generate loadings for Monocytes
+
+```{r}
+# load array data in which most variable probe has been retained and 5FPB#5 already removed; the data is loaded into dedata
+load("Monocyte_dedata.rda")
+dedata = dedata[,grep("FPB|APB",names(dedata))]
+
+# reduce array data to genes of interest
+dedata = dedata[rownames(dedata) %in% d$gene[d$cell=="Mono"],]
+
+# extract pheno data for pca plot
+group = rep("FPB",dim(dedata)[2])
+group[grep("APB",names(dedata))] = "APB"
+names(group) = names(dedata)
+pcdat = prcomp(x=t(dedata),scale.=TRUE)
+
+# get PC1 loadings to make signature
+Msig = data.frame(pcdat$rotation[,1:2])[,1]
+names(Msig) = rownames(data.frame(pcdat$rotation[,1:2]))
+
+# what % of variation in array data is explained by PC1
+(pcdat$sdev^2)[1]/sum(pcdat$sdev^2)
+```
+
+#### Plot the PCA (Figure S2)
+
+```{r, fig.width=2.4, fig.height=2.4}
+# Gather data
+pc <- data.frame(pcdat$x[,1:2],group=group[match(rownames(pcdat$x),names(group))],sample=rownames(pcdat$x))
+# get loadings
+loadings <- data.frame(pcdat$rotation[,1:2])
+# amplify loadings so we can see them on the plot
+loadings <- loadings * 35
+loadings$gene <- rownames(loadings)
+# Make a pretty plot
+(p <- ggplot(data=pc,
+           aes(PC1, PC2)) +
+  geom_point(aes(fill=group),
+             color="black", size=3, shape = 21) +
+  scale_fill_manual(values=dittoColors()[c(1,3)]) +
+  geom_segment(data=loadings,
+               aes(x=0, y=0, xend=PC1, yend=PC2),
+               arrow=arrow(length=unit(0.2,"cm")),
+               alpha=0.25) +
+  geom_text_repel(data=loadings[loadings$PC1<0,],
+            direction = "both", xlim = c(NA, -7),
+            aes(x=PC1, y=PC2, label=gene, fontface = 2),
+            force = 3, seed = 5, min.segment.length = 0.05,
+            size=2, segment.size = 0.2,
+            box.padding = 0.01,
+            max.iter = 1e5) +
+  geom_text_repel(data=loadings[loadings$PC1>0,],
+            direction = "both", xlim = c(7, NA),
+            aes(x=PC1, y=PC2, label=gene, fontface = 2),
+            force = 3, seed = 5, min.segment.length = 0.05,
+            size=2, segment.size = 0.2,
+            box.padding = 0.01,
+            max.iter = 1e5) +
+  xlab(paste0("PC1 (",
+              round(100*(pcdat$sdev^2)[1]/sum(pcdat$sdev^2), digits = 1),
+              "%)")) +
+  ylab(paste0("PC2 (",
+              round(100*(pcdat$sdev^2)[2]/sum(pcdat$sdev^2), digits = 1),
+              "%)")) +
+  theme_bw() + ggtitle(NULL, subtitle = "Monocytes") +
+  theme(axis.title.x= element_text(size = 8),
+        axis.text.x= element_text(size = 8, face = "bold"),
+        axis.title.y= element_text(size = 8),
+        axis.text.y= element_text(size = 8),
+        plot.subtitle= element_text(size = 9)) +
+  coord_cartesian(clip = "off", xlim = c(-13,13)) +
+  theme(legend.position = "none"))
+# p = p + geom_text(aes(label=sample))
+pdf("Microarray-qPCR-Figs/PCA_Mono_Array.pdf", w = 2.4, h = 2.4)
+p
+dev.off()
+```
+
+#### Plot the loadings (Figure S2)
+
+```{r, fig.width=1.5, fig.height=2.5}
+Mdat <- data.frame(
+    weights = Msig,
+    genes = factor(names(Msig), levels = names(Msig[order(Msig)])),
+    sign = Msig>0)
+(p <- ggplot(Mdat, aes(x = genes, y = weights, fill = sign)) +
+  geom_col(color = "black", width = 0.7) + coord_flip() + theme_classic() +
+  scale_fill_manual(values = c("blue3","red3"), guide = FALSE) +
+  geom_hline(yintercept = 0) +
+  scale_y_continuous(breaks = c(-0.2,0,0.2)) +
+  theme(axis.text.x= element_text(size = 7),
+        axis.text.y= element_text(size = 6),
+        axis.title.x= element_text(size = 7),
+        plot.title = element_text(size = 9)) +
+  xlab(NULL))
+pdf("Microarray-qPCR-Figs/Msig_weights.pdf", w=1.5, h=2.5)
+p
+dev.off()
+```
+
+## 3) Apply the signature to Fetal, UCB, and adult qPCR or microarray samples
+
+### 1. To UCB qPCR
+
+```{r}
+# remember, d is the qPCR data on the cord blood samples
+dt = d[d$cell == "T" & d$gene %in% names(Tsig),]
+dt = ddply(dt,.(id,gene,run),summarize,log2exp = mean(log2exp,na.rm=TRUE))
+dt = ddply(dt,.(gene),transform,log2exp.stand = scale(log2exp))
+
+dm = d[d$cell == "Mono" & d$gene %in% names(Msig),]
+dm = ddply(dm,.(id,gene,run),summarize,log2exp = mean(log2exp,na.rm=TRUE))
+dm = ddply(dm,.(gene),transform,log2exp.stand = scale(log2exp))
+
+dt$coef = Tsig[match(dt$gene,names(Tsig))]
+dm$coef = Msig[match(dm$gene,names(Msig))]
+
+dt = ddply(dt,.(id,run),summarize,Tsig = sum(log2exp.stand * coef))
+dm = ddply(dm,.(id,run),summarize,Msig = sum(log2exp.stand * coef))
+```
+
+### 2. To fetal & adult qPCR
+
+```{r}
+load("qRTPCR_data/Controls/dconJune.RData")
+# the data from the preceeding line loads in a data frame called dconJune, which was created from the C1 data in a similar method to the above, using the script analysis_nonC1samples_updated.R
+
+# reduce control data to genes from SILVER runs
+all(unique(d$gene) %in% unique(dconJune$gene))
+dconJune = dconJune[dconJune$gene %in% unique(d$gene),]
+
+### T Cells ###
+
+# Separate out t cell data
+dcont = dconJune[dconJune$cell == "t" & dconJune$gene %in% names(Tsig),]
+# average replicates
+dcont = ddply(dcont,.(tissue,subject,gene,cord),summarize,log2exp = mean(log2exp,na.rm=TRUE))
+# standardize each gene (z score)
+dcont = ddply(dcont,.(gene),transform,log2exp.stand = scale(log2exp))
+
+# get gene weights from signature
+dcont$coef = Tsig[match(dcont$gene,names(Tsig))]
+
+# compute signature scores
+dcont = ddply(dcont,.(tissue,subject,cord),summarize,Tsig = sum(log2exp.stand * coef))
+
+### Monocytes ###
+
+# Separate out t cell data
+dconm = dconJune[dconJune$cell == "m" & dconJune$gene %in% names(Msig),]
+# average replicates
+dconm = ddply(dconm,.(tissue,subject,gene,cord),summarize,log2exp = mean(log2exp,na.rm=TRUE))
+# standardize each gene (z score)
+dconm = ddply(dconm,.(gene),transform,log2exp.stand = scale(log2exp))
+
+# get gene weights from signature
+dconm$coef = Msig[match(dconm$gene,names(Msig))]
+
+# compute signature scores
+dconm = ddply(dconm,.(tissue,subject,cord),summarize,Msig = sum(log2exp.stand * coef))
+```
+
+### 3. To previous microarrays
+
+This function takes in a GEO ExpressionSet, then trims to (max variance probe for) each signature gene, 
+
+```{r}
+eset_to_ImmAgeScores <- function(eset = Monocyte_eset, loadings = Msig) {
+  # INPUT: Takes in an ExpressionSet (eset) obtained from GEO, and a named
+    # vector gene loadings for Immunological Age Scoring (loadings; values
+    # named by gene_symbols)
+  # VALUE: Vector of Immunological Age Scores for each sample in the eset
+  # DETAILS: It subsets the loadings to genes probed in the expression dataset,
+    # and utilizes expression data for the probes, of each gene in loadings,
+    # with the highest variance as measured by interquartile range,
+    # then calculates Immunological Age Scores by summing the product of the
+    # loading for each gene * the relative (z-score) expression of each sample
+    # for each gene.
+
+  # get all the array probe ids that match the genes in th Scoring loadings
+  probeids <- as.character(fData(eset)$ID)	
+  probelist <- sapply(names(loadings),function(x) probeids[which(fData(eset)$GENE_SYMBOL==x)])
+  
+  # retain only most variable probe
+  mostvar <- function(theprobes) {
+  	vars <- sapply(theprobes,function(x) IQR(exprs(eset)[which(fData(eset)$ID==x),]))
+  	return(theprobes[which.max(vars)])
+  }
+  probelist <- llply(probelist,mostvar)
+  
+  # convert array probe ids into a single vector,
+  # which will have any genes not probed in the dataset removed.
+  probes_use = NULL
+  for (curitem in seq_along(probelist)) {
+  	probes_use = c(probes_use,probelist[[curitem]])
+  }
+  if (length(probes_use)!=length(probelist)) {
+    not_found_inds <- sapply(seq_along(probelist),
+                             function(X) length(probelist[[X]])==0)
+    warning(paste0(names(probelist)[not_found_inds], collapse = ", "),
+            " not found in the dataset.\n")
+    probelist <- probelist[!not_found_inds]
+    loadings <- loadings[!not_found_inds]
+  }
+  
+  # Obtain relevant expression data
+  dedata <- exprs(eset)[probes_use,]
+  rownames(dedata) <- names(probelist)
+  
+  # Calculate scores based on scaled (relative!) expression within the dataset
+  scaled_data <- t(scale(t(dedata)))
+  Scores <- apply(scaled_data*loadings,2,sum)
+}
+```
+
+#### Mold et al., Science, 2010 T cell data.
+
+```{r}
+# Obtain data and rename samples by their titles
+Tcell_eset <- getGEO(GEO = "GSE25087")[[1]]
+colnames(Tcell_eset) <- Tcell_eset$title
+
+# Trim to naive T cells (dataset also contains CD25+ Tregs)
+Tcell_eset <- Tcell_eset[,grep("Naïve",Tcell_eset$title)]
+
+# Correct the name of the datasets gene_symbol feature data
+fData(Tcell_eset)$GENE_SYMBOL = fData(Tcell_eset)$'Gene Symbol'
+```
+
+```{r}
+# Score
+(Tmicro <- eset_to_ImmAgeScores(eset = Tcell_eset, loadings = Tsig))
+```
+
+#### Krow-Lucal et al., Blood, 2014 Monocyte data.
+
+```{r}
+# Obtain data and rename samples by their titles
+Monocyte_eset <- getGEO(GEO = "GSE54818")[[1]]
+colnames(Monocyte_eset) <- Monocyte_eset$title
+
+# Trim to unstimulated cells (dataset also contains IFNg stimulations)
+Monocyte_eset <- Monocyte_eset[,grep("Unstim",Monocyte_eset$title)]
+```
+
+```{r}
+# Score
+(Mmicro <- eset_to_ImmAgeScores(eset = Monocyte_eset, loadings = Msig))
+```
+
+## Combine all of the scoring and annotations into a single data.frame for plotting
+
+```{r}
+#Create data frame
+tdata <- data.frame(
+  sample.name = c(names(Tmicro), # Tcell microarray
+                  dt$id, # UCB qPCR
+                  paste(dcont$tissue,dcont$subject)), # control qPCR
+  signature=c(Tmicro,
+              dt$Tsig,
+              dcont$Tsig),
+  age = c(rep("fetal", 3), #Tmicro has three fetal, then 3 adult
+          rep("adult", 3),
+          rep("UCB", 29), # UCB qPCR data has 29 samples after all trimming
+          rep("adult", 3), # Fetal and adult control qPCR has 3 adult, then 3 fetal
+          rep("fetal", 3)),
+  tissue=c(rep("FmLN",3), # mLN = mesenteric lymph node
+           rep("APB", 3),
+           rep("UCB",dim(dt)[1]),
+           toupper(dcont$tissue)),
+  run = c(rep("array",length(Tmicro)),
+          paste("qPCR",dt$run),
+          paste("qPCR June",dcont$cord)),
+  platform = c(rep("array",length(Tmicro)),
+               rep("qPCR",length(dt$run)),
+               rep("qPCR",length(dcont$cord))),
+  celltype = "T cells")
+mdata <- data.frame(
+  sample.name = c(names(Mmicro), # Monocyte microarray
+                  dm$id, # UCB qPCR
+                  paste(dconm$tissue,dconm$subject)), # fetal and adult control qPCR
+  signature=c(Mmicro,
+              dm$Msig,
+              dconm$Msig),
+  age = c(rep("adult", 4), #Mmicro has four adult, then 4 fetal
+          rep("fetal", 4),
+          rep("UCB", 27), # UCB qPCR data has 27 samples after all trimming
+          rep("adult", 3), # Fetal and adult control qPCR has 3 adult, then 3 fetal
+          rep("fetal", 3)),
+  tissue=c(rep("ABM",4), # Mmicro used bone marrow tissues.
+           rep("FBM", 4),
+           rep("UCB",dim(dm)[1]),
+           toupper(dconm$tissue)),
+  run = c(rep("array",length(Mmicro)),
+          paste("qPCR",dm$run),
+          paste("qPCR June",dconm$cord)),
+  platform = c(rep("array",length(Mmicro)),
+               rep("qPCR",length(dm$run)),
+               rep("qPCR",length(dconm$cord))),
+  celltype = "Monocytes")
+
+# Change incorrectly labeled FLN from control qPCR data to FS (fetal spleen)
+tdata$tissue <- as.character(tdata$tissue)
+tdata$tissue[tdata$tissue=="FLN"] <- "FS"
+
+# Combine T and M data
+alldata <- rbind(tdata,mdata)
+
+# Change order of how tissues will be plotted.
+alldata$tissue <- factor(
+  alldata$tissue,
+  levels=c("FPB","FS","FmLN","FBM","UCB","APB","ABM"))
+
+# Add line with both age and celltype
+alldata$agetype <- paste(alldata$age, alldata$celltype, sep = "\n")
+# Change order of how ages will be plotted.
+alldata$agetype <- factor(
+  alldata$agetype,
+  levels = c("fetal\nT cells", "adult\nT cells", "UCB\nT cells",
+             "fetal\nMonocytes", "adult\nMonocytes", "UCB\nMonocytes"))
+alldata$age <- factor(
+  alldata$age,
+  levels=c("fetal","adult","UCB"))
+
+## Save!
+save(alldata, file = "Microarray-qPCR-Figs/sigscoring_withControls_alldata.rdata")
+```
+
+Also calculate summary statistics per group for adding to plots
+
+```{r}
+# Specifically, we want standard deviation and standard error, but this also calculates a bunch more.
+summaryStats <- summarySE(
+  alldata, measurevar="signature",
+  groupvars=c("age","platform","tissue","celltype"))
+summaryStats$agetype <- paste(summaryStats$age, summaryStats$celltype, sep = "\n")
+```
+
+# 4. Plot scores
+
+## UCSF/SLVR qPCR with fetal and adult qPCR controls (Figure 2)
+
+```{r, fig.width=3, fig.height=3}
+### Fetal and Adult Scores
+
+(p <- ggplot(
+  alldata[
+    alldata$platform=="qPCR" & alldata$age %in% c("fetal", "adult"),],
+  aes(x = agetype, y = signature, fill = age),
+  color = "black") +
+  # scores
+  geom_jitter(position=position_jitter(w=0.2,h=0), shape = 21) + 
+  # SEM bars
+   geom_errorbar(
+    data = summaryStats[
+      summaryStats$platform=="qPCR" & summaryStats$age %in% c("fetal", "adult"),],
+    aes(x = agetype, ymin = signature - se, ymax = signature + se),
+    width = 0.3, color = "black") +
+  # mean bar
+  geom_errorbar(
+    data = summaryStats[
+      summaryStats$platform=="qPCR" & summaryStats$age %in% c("fetal", "adult"),],
+    aes(x = agetype, ymin = signature, ymax = signature),
+    width = 0.5, color = "black") +
+  # Plot theme and titles
+  theme_classic() +
+  theme(legend.position = "none") +
+  ylab("Immunological Age Score") +
+  xlab(NULL) +
+  ggtitle(NULL, subtitle = " Fetal and Adult\nassessed by qRT-PCR") +
+  theme(axis.text.x= element_text(angle=45, hjust=1, vjust=1),
+        axis.title.y= element_text(size = 10),
+        plot.subtitle = element_text(size = 11)) +
+  coord_cartesian(ylim = c(-4, 4)) +
+  scale_fill_manual(values = dittoColors()[c(3,1)]))
+
+pdf("Microarray-qPCR-Figs/SigScoring_FandA_qPCR.pdf",w=3,h=3)
+p
+dev.off()
+```
+
+```{r, fig.width=2.1, fig.height=3}
+# Create a cord data for adding violins without rearranging the age order
+corddata <- alldata[alldata$platform=="qPCR" & alldata$age=="UCB",]
+
+### Classical Monocyte Scores
+(p <- ggplot(
+  corddata[corddata$platform=="qPCR",],
+  aes(x = agetype, y = signature, fill = age),
+  color = "black") +
+  # scores
+  geom_violin(alpha = 0.75) +
+  geom_jitter(position=position_jitter(w=0.2,h=0), shape = 21) + 
+  # SEM
+  geom_errorbar(
+    data = summaryStats[
+      summaryStats$platform=="qPCR" & summaryStats$age=="UCB",],
+    aes(x = agetype, ymin = signature - se, ymax = signature + se),
+    width = 0.3, color = "black") +
+  # mean
+  geom_errorbar(
+    data = summaryStats[
+      summaryStats$platform=="qPCR" & summaryStats$age=="UCB",],
+    aes(x = agetype, ymin = signature, ymax = signature),
+    width = 0.5, color = "black") +
+  # Plot theme and titles
+  theme_classic() +
+  theme(legend.position = "none") +
+  ylab("Immunological Age Score") +
+  xlab(NULL) + ggtitle(NULL, subtitle = " Newborn UCB\nassessed by qRT-PCR") +
+  theme(axis.text.x= element_text(angle=45, hjust=1, vjust=1),
+        axis.title.y= element_text(size = 10),
+        plot.subtitle = element_text(size = 11)) +
+  coord_cartesian(ylim = c(-4, 4)) +
+  scale_fill_manual(values = dittoColors()[c(2)]))
+
+pdf("Microarray-qPCR-Figs/SigScoring_UCB_qPCR.pdf",w=2.1,h=3)
+p
+dev.off()
+```
+
+```{r, fig.width=2.7, fig.height=2.7}
+# Correlation of T cell versus monocyte scores
+
+corddata.bysample <- 
+    dplyr::inner_join(
+        alldata[alldata$celltype=="T cells" & alldata$age=="UCB",c(1,2)],
+        alldata[alldata$celltype=="Monocytes" & alldata$age=="UCB",c(1,2)],
+        by = "sample.name")
+names(corddata.bysample) <- c("sample.name", "Tsig", "Msig")
+# Calculate Correlation statistics
+cor <- cor.test(corddata.bysample$Tsig,corddata.bysample$Msig)
+# Make the plot
+(p <- ggplot(corddata.bysample, aes(x = Tsig, y = Msig)) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", size = 1.5) +
+  geom_point(fill = dittoColors()[2], color = "black", shape = 21) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  ylab("Monocytes") +
+  xlab("T cells") +
+  ggtitle(NULL, subtitle = "Correlation of scores") +
+  geom_text(
+      data = data.frame(
+          x = c(0.6,0.6),
+          y = c(-1.6, -2.1),
+          label = c(
+              paste0("r = ", signif(cor$estimate,2)),
+              paste0("p = ", signif(cor$p.value,2)))),
+      aes(x = x, y = y, label = label))+
+  theme(axis.title.x= element_text(size = 10),
+        axis.title.y= element_text(size = 10),
+        plot.subtitle = element_text(size = 11)) +
+  coord_cartesian(clip = "off"))
+pdf("Microarray-qPCR-Figs/SigScoring_Correlation_qPCR.pdf",w=2.7,h=2.7)
+p
+dev.off()
+```
+
+## Previous microarrays (Figure S2)
+
+```{r, fig.height=2, fig.width=1.5}
+# MicroArray:
+(p <- ggplot(alldata[alldata$platform=="array" & alldata$celltype=="Monocytes",],
+       aes(x = age, y = signature, fill = age)) + 
+  # geom_boxplot(outlier.shape=NA,fill=NA) +
+  geom_jitter(position=position_jitter(w=0.2,h=0), shape = 21) + 
+  geom_errorbar(data = summaryStats[summaryStats$platform=="array" & summaryStats$celltype=="Monocytes",],
+                aes(x = age, ymin = signature - se, ymax = signature + se),
+                width = 0.3,
+                color = "black") +
+  geom_errorbar(data = summaryStats[summaryStats$platform=="array" & summaryStats$celltype=="Monocytes",],
+                aes(x = age, ymin = signature, ymax = signature),
+                width = 0.5,
+                color = "black") +
+  theme_classic() +
+  theme(legend.position = "none") +
+  ylab("Microarray-based\nImmunological Age Score") +
+  xlab(NULL) + ggtitle(NULL, subtitle = "Monocytes\nmicroarray") +
+  theme(axis.text.x= element_text(angle=45, hjust=1, vjust=1),
+        axis.title.y= element_text(size = 8),
+        plot.subtitle = element_text(size = 9)) +
+  scale_fill_manual(values = dittoColors()[c(3,1)]))
+pdf("Microarray-qPCR-Figs/SigScoring_Monocytes_array.pdf",w=1.5,h=2)
+p
+dev.off()
+
+(p <- ggplot(alldata[alldata$platform=="array" & alldata$celltype=="T cells",],
+       aes(x = age, y = signature, fill = age)) + 
+  # geom_boxplot(outlier.shape=NA,fill=NA) +
+  geom_jitter(position=position_jitter(w=0.2,h=0), shape = 21) + 
+  geom_errorbar(data = summaryStats[summaryStats$platform=="array" & summaryStats$celltype=="T cells",],
+                aes(x = age, ymin = signature - se, ymax = signature + se),
+                width = 0.3,
+                color = "black") +
+  geom_errorbar(data = summaryStats[summaryStats$platform=="array" & summaryStats$celltype=="T cells",],
+                aes(x = age, ymin = signature, ymax = signature),
+                width = 0.5,
+                color = "black") +
+  theme_classic() +
+  theme(legend.position = "none") +
+  ylab("Microarray-based\nImmunological Age Score") +
+  xlab(NULL) + ggtitle(NULL, subtitle = "  T cells\nmicroarray") +
+  theme(axis.text.x= element_text(angle=45, hjust=1, vjust=1),
+        axis.title.y= element_text(size = 8),
+        plot.subtitle = element_text(size = 9)) +
+  scale_fill_manual(values = dittoColors()[c(3,1)]))
+pdf("Microarray-qPCR-Figs/SigScoring_Tcells_array.pdf",w=1.5,h=2)
+p
+dev.off()
+```

@@ -1,0 +1,417 @@
+---
+title: "Dataset comparisons"
+author: "Dan Bunis"
+date: "2/26/2020"
+output:
+  html_document:
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dittoSeq)
+library(DESeq2)
+library(Seurat)
+library(MAST)
+library(eulerr)
+```
+
+# NOTE: This code requires outputs of other markdown code from this porject and should be run last.
+
+Required data:
+
+- Final output, bulkCD4.Rds, of the bulk naive CD4 T cell analysis (bulkRNAseq_CD4naiveTcells.Rmd).
+- Final output, Tcells.Rds, of the single-cell naive T cell analyses (scRNAseq_naiveTcells.Rmd)
+- Differential expression output of T cells, Microarray_APBvsFPBTcells_FDR0.05_FC1.5_LongAnn.csv, from microarray analysis (generated in the first half of microarray-and-qRTPCR_CD4naiveTcells-and-monocytes.Rmd)
+
+# 0) Load datasets
+```{r}
+Tcells <- readRDS("Tcells.rds")
+bulkCD4 <- readRDS("bulkCD4.rds")
+```
+
+# 1) Comparison of bulk and single-cell naive CD4 T cell differential expression calls
+
+Equivalent differential expression cutoff:
+
+- Absolute Fold Change >= 1.5
+- FDR <= 0.05
+- Non-ribosomal & non-mitochondrial (not analyzed in the bulk RNAseq datasset)
+
+```{r, results = "hide"}
+# Create function to remove ribosomal and mitochondrial genes
+remove.ribo.mito <- function(genelist){
+  if (length(grep("^RPL|^RPS|^MT-",genelist))>0){
+    return(genelist[-grep("^RPL|^RPS|^MT-",genelist)])
+  } else {
+    genelist
+  }
+}
+
+# Set the clustering to be by T-celltype + age ("Tage" meta) so the Seurat FindMarkers function will use this.
+Idents(Tcells) <- "Tage"
+# Fetal vs Adult
+sc4FvA <- FindMarkers(Tcells,
+                     ident.1 = "4-fetal",
+                     ident.2 = "4-adult",
+                     test.use = "MAST")
+sc4FvA_padjFC <- sc4FvA[abs(sc4FvA$avg_logFC)>=log2(1.5) &
+                          sc4FvA$p_val_adj<=0.05 &
+                          !is.na(sc4FvA$p_val_adj),]
+# Fetal vs UCB
+sc4FvC <- FindMarkers(Tcells,
+                     ident.1 = "4-fetal",
+                     ident.2 = "4-cord",
+                     test.use = "MAST")
+sc4FvC_padjFC <- sc4FvC[abs(sc4FvC$avg_logFC)>=log2(1.5) &
+                          sc4FvC$p_val_adj<=0.05 &
+                          !is.na(sc4FvC$p_val_adj),]
+# UCB vs Adult
+sc4CvA <- FindMarkers(Tcells,
+                     ident.1 = "4-cord",
+                     ident.2 = "4-adult",
+                     test.use = "MAST")
+sc4CvA_padjFC <- sc4CvA[abs(sc4CvA$avg_logFC)>=log2(1.5) &
+                          sc4CvA$p_val_adj<=0.05 &
+                          !is.na(sc4CvA$p_val_adj),]
+
+### Split up and down genes.
+FETAL_sc4FvA <- remove.ribo.mito(rownames(sc4FvA_padjFC[sc4FvA_padjFC$avg_logFC>0,]))
+ADULT_sc4FvA <- remove.ribo.mito(rownames(sc4FvA_padjFC[sc4FvA_padjFC$avg_logFC<0,]))
+
+FETAL_sc4FvC <- remove.ribo.mito(rownames(sc4FvC_padjFC[sc4FvC_padjFC$avg_logFC>0,]))
+UCB_sc4FvC <- remove.ribo.mito(rownames(sc4FvC_padjFC[sc4FvC_padjFC$avg_logFC<0,]))
+
+UCB_sc4CvA <- remove.ribo.mito(rownames(sc4CvA_padjFC[sc4CvA_padjFC$avg_logFC>0,]))
+ADULT_sc4CvA <- remove.ribo.mito(rownames(sc4CvA_padjFC[sc4CvA_padjFC$avg_logFC<0,]))
+```
+
+Re-calculate the bulk markers
+
+```{r, results = "hide"}
+#Extract comparisons from DESeq
+FvA <- as.data.frame(results(bulkCD4@DEobject, contrast=c("Age","Fetal","Adult")))
+FvC <- as.data.frame(results(bulkCD4@DEobject, contrast=c("Age","Fetal","Cord")))
+CvA <- as.data.frame(results(bulkCD4@DEobject, contrast=c("Age","Cord","Adult")))
+
+#Trim to DE cutoffs
+FvA_padjFC <- FvA[(
+   (FvA$padj<=0.05) & (abs(FvA$log2FoldChange)>=log2(1.5)) & (!is.na(FvA$padj))
+   ),]
+FvC_padjFC <- FvC[(
+  (FvC$padj<=0.05) & (abs(FvC$log2FoldChange)>=log2(1.5)) & (!is.na(FvC$padj))
+  ),]
+CvA_padjFC <- CvA[(
+  (CvA$padj<=0.05) & (abs(CvA$log2FoldChange)>=log2(1.5)) & (!is.na(CvA$padj))
+  ),]
+
+### Split up and down genes.
+FETAL_FvA <- rownames(FvA_padjFC[FvA_padjFC$log2FoldChange>0,])
+FETAL_FvC <- rownames(FvC_padjFC[FvC_padjFC$log2FoldChange>0,])
+
+UCB_FvC <- rownames(FvC_padjFC[FvC_padjFC$log2FoldChange<0,])
+UCB_CvA <- rownames(CvA_padjFC[CvA_padjFC$log2FoldChange>0,])
+
+ADULT_FvA <- rownames(FvA_padjFC[FvA_padjFC$log2FoldChange<0,])
+ADULT_CvA <- rownames(CvA_padjFC[CvA_padjFC$log2FoldChange<0,])
+```
+
+## Venns
+
+```{r}
+width = 2.5
+height = 2.3
+
+eulerr_options(fills = list(fill = dittoColors()[c(4,5)],
+                            alpha = c(1,1)),
+               labels = list(fontsize = 9))
+set.seed(1908)
+pdf("Comparison-Figs/venn_CD4s_FetalvA.pdf", w=width, h=height)
+plot(venn(c('bulkCD4s' = list(FETAL_FvA),
+            'scCD4s' = list(FETAL_sc4FvA))),
+     main = "Fetal Enriched")
+dev.off()
+set.seed(1908)
+pdf("Comparison-Figs/venn_CD4s_AdultvF.pdf", w=width, h=height)
+plot(venn(c('bulkCD4s' = list(ADULT_FvA),
+            'scCD4s' = list(ADULT_sc4FvA))),
+     main = "Adult Enriched")
+dev.off()
+set.seed(1908)
+pdf("Comparison-Figs/venn_CD4s_FetalvC.pdf", w=width, h=height)
+plot(venn(c('bulkCD4s' = list(FETAL_FvC),
+            'scCD4s' = list(FETAL_sc4FvC))),
+     main = "Fetal Enriched")
+dev.off()
+set.seed(1908)
+pdf("Comparison-Figs/venn_CD4s_CordvF.pdf", w=width, h=height)
+plot(venn(c('bulkCD4s' = list(UCB_FvC),
+            'scCD4s' = list(UCB_sc4FvC))),
+     main = "UCB Enriched")
+dev.off()
+set.seed(1908)
+pdf("Comparison-Figs/venn_CD4s_CordvA.pdf", w=width, h=height)
+plot(venn(c('bulkCD4s' = list(UCB_CvA),
+            'scCD4s' = list(UCB_sc4CvA))),
+     main = "UCB Enriched")
+dev.off()
+set.seed(1908)
+pdf("Comparison-Figs/venn_CD4s_AdultvC.pdf", w=width, h=height)
+plot(venn(c('bulkCD4s' = list(ADULT_CvA),
+            'scCD4s' = list(ADULT_sc4CvA))),
+     main = "Adult Enriched")
+dev.off()
+```
+
+## Overlapping Genes Exploration
+
+```{r}
+allsc4 <- unique(c(rownames(sc4FvA_padjFC),
+                   rownames(sc4FvC_padjFC),
+                   rownames(sc4CvA_padjFC)))
+allbulk4 <- unique(c(FETAL_FvA, FETAL_FvC,
+                     UCB_FvC, UCB_CvA,
+                     ADULT_FvA, ADULT_CvA))
+
+# What are the unique-to-single-cell genes in the Fetal vs Adult comparison?
+remove.ribo.mito(rownames(
+  sc4FvA_padjFC[!rownames(sc4FvA_padjFC) %in% c(FETAL_FvA, ADULT_FvA),]))
+# What are the unique-to-single-cell genes in the Fetal vs UCB comparison?
+remove.ribo.mito(rownames(
+  sc4FvC_padjFC[!rownames(sc4FvC_padjFC) %in% c(FETAL_FvC, UCB_FvC),]))
+```
+
+# 2) Compare expression of peripheral-only Microarray FvA genes in mixed tissue bulk RNAseq
+
+This is a comparison of how the naive CD4 T cell gene signature obtained from comparison of fetal peripheral versus adult peripheral blood samples with microarray works for characterizing Fetal-splenic (vs UCB) vs Adult peripheral blood naive CD4 T cells in bulk RNA-seq.
+
+```{r}
+# Read in microarray signature
+# The differential expression microaarray data is already cutoff to log2FC=1.5 and FDR <= 0.05.
+microarray <- read.csv("Microarray_APBvsFPBTcells_FDR0.05_FC1.5_LongAnn.csv",
+                       header = T, row.names = 1)
+# Remove genes not analyzed further in this dataset.
+microarray <- microarray[-grep("^XLOC|^LOC|^ENST|ORF|orf|A_19|A_24|A_33", rownames(microarray)),]
+
+# Trim to only the genes in the bulk RNAseq dataset.
+microarray_in <- microarray[is.gene(rownames(microarray),bulkCD4),]
+
+# Store directionality
+enriched <- array("fetal-enriched", nrow(microarray_in))
+enriched[microarray_in$logFC>0] <- "adult-enriched"
+
+# Create a metadata for easily labeling the samples with their tissue identities.
+age.names <- factor(meta("Samples", bulkCD4), labels = paste0(rep(c("APB-","FS-","UCB-"),each = 5), 1:5))
+bulkCD4@meta.data$age.names <- age.names
+
+### Plot
+# Create Heatmap
+hm <- dittoHeatmap(
+  genes = rownames(microarray_in), object = bulkCD4, annotation.metas = "Age",
+  annotation_row = data.frame(
+    'MicroarrayAnnotation' = enriched,
+    row.names = rownames(microarray_in)),
+  annotation.colors = c(dittoColors()[1:3], "red", "blue"),
+  cutree_row = 2, cutree_col = 3,
+  show.rownames = FALSE, cell.names.meta = "age.names",
+  treeheight_row = 15, treeheight_col = 15)
+# Create fetal (microarray) gene summary plot
+(pF <- dittoPlotVarsAcrossGroups(
+  rownames(microarray_in[microarray_in$logFC<0,]),
+  object = bulkCD4,
+  group.by = "Age",
+  x.reorder = 3:1,
+   x.labels = c("FS", "UCB", "APB"),
+  plots = c("vlnplot","boxplot"),
+  data.type = "relative",
+  main = NULL, jitter.size = 0.3,
+  sub = "Fetal-enriched\nmicroarray genes",
+  boxplot.color = "white",
+  boxplot.fill = FALSE,
+  y.breaks = -1:1,
+  xlab = NULL,
+  ylab = NULL,
+  legend.show = FALSE,
+  vlnplot.lineweight = 0.5,
+  theme = theme_bw()))
+# Create adult (microarray) gene summary plot
+(pA <- dittoPlotVarsAcrossGroups(
+  rownames(microarray_in[microarray_in$logFC>0,]),
+  object = bulkCD4,
+  group.by = "Age",
+  x.reorder = 3:1,
+  x.labels = c("FS", "UCB", "APB"),
+  plots = c("vlnplot","boxplot"),
+  data.type = "relative",
+  main = NULL, jitter.size = 0.3,
+  sub = "Adult-enriched\nmicroarray genes",
+  boxplot.color = "white",
+  boxplot.fill = FALSE,
+  y.breaks = -1:1,
+  xlab = NULL,
+  ylab = NULL,
+  legend.show = FALSE,
+  vlnplot.lineweight = 0.5,
+  theme = theme_bw()))
+# Plot these altogether.
+pdf("Comparison-Figs/RNAseqVsMicroarray_heatmap.pdf", w = 7, h = 6)
+gridExtra::grid.arrange(grobs = list(hm[[4]],pF,pA),
+    ncol = 7,
+    nrow = 5,
+    layout_matrix = 
+        rbind(c(1,1,1,1,1,2,2),
+              c(1,1,1,1,1,2,2),
+              c(1,1,1,1,1,3,3),
+              c(1,1,1,1,1,3,3),
+              c(1,1,1,1,1,NA,NA)))
+dev.off()
+```
+
+# 3) Compare expression in bulk RNAseq samples to Treg signature from Ng, et al. 2019.
+
+For this comparison, we need some supplemental data from Ng et. al., "Helios enhances the preferential differentiation of human fetal CD4+ naïve T cells into regulatory T cells", Science, 2019:
+
+- Table S1: https://immunology.sciencemag.org/highwire/filestream/642275/field_highwire_adjunct_files/1/aav5947_Table_S1.xlsx
+
+The table contains two tabs, but we need data from both, so I copied the second tab into the first, remove the extra cell of data holding legend information, then exported as a csv.  That csv is what gets loaded in in the first line of code below.
+
+```{r}
+Treg_sig <- read.csv("Ng2019_Table_S1_TregSignature_bothTabs.csv",
+                     stringsAsFactors = F, header = T)[,c(1,8)]
+# Extract Treg up genes captured in this dataset
+Treg_UP <- Treg_sig$Gene_symbol[Treg_sig$Heatmap.Cluster %in% c("Cluster 1","Cluster 2")]
+Treg_UP_in <- Treg_UP[is.gene(Treg_UP, bulkCD4)]
+# Extract Treg down genes captured in this dataset
+Treg_DOWN <- Treg_sig$Gene_symbol[Treg_sig$Heatmap.Cluster %in% c("Cluster 3","Cluster 4")]
+Treg_DOWN_in <- Treg_DOWN[is.gene(Treg_DOWN, bulkCD4)] 
+
+#Make age annotation metadata
+bulkCD4@meta.data$Age.names <- paste(gsub("Cord", "UCB",meta("Age", bulkCD4)),1:5, sep = "-")
+
+#Make Treg gene annotations:
+genes_annot <- data.frame(TregExpression = c(rep("Up", length(Treg_UP_in)),
+                                             rep("Down", length(Treg_DOWN_in))),
+                          row.names = c(Treg_UP_in, Treg_DOWN_in),
+                          stringsAsFactors = FALSE)
+
+# Select specific Treg genes to highlight:
+highlights <- c("IL2RA", "FOXP3", "CTLA4", "IKZF2", "IKZF4")
+# highlights_in <- is.gene(highlights, bulkCD4, TRUE) # ALl are inside
+# Collect average z-score expression levels of each gene in all ages, then separate by gene for adding these to the summary plots
+all_exp_df <- data.frame(
+  z.exp = 
+    c(sapply(highlights, function(X) {
+      mean(gene(X, bulkCD4, data.type = "relative")[meta("Age",bulkCD4)=="Fetal"])
+    }),
+    sapply(highlights, function(X) {
+      mean(gene(X, bulkCD4, data.type = "relative")[meta("Age",bulkCD4)=="Cord"])
+    }),
+    sapply(highlights, function(X) {
+      mean(gene(X, bulkCD4, data.type = "relative")[meta("Age",bulkCD4)=="Adult"])
+    })),
+  gene = rep(highlights,3),
+  grouping = rep(c("F","UCB","A"), each = 5))
+cord_exp_df <- all_exp_df[all_exp_df$grouping == "UCB",]
+
+# Make plots
+hm <- dittoHeatmap(rownames(genes_annot),
+    object = bulkCD4,
+    annotation.metas = "Age",
+    cell.names.meta = "Age.names",
+    main = "Treg Signature Genes",
+    annotation_row = genes_annot,
+    cutree_row = 2, treeheight_row = 15,
+    cutree_col = 3, treeheight_col = 15,
+    highlight.genes = highlights,
+    show.rownames = FALSE,
+    annotation.colors = c(dittoColors()[1:3],"blue","red"))
+(pUP <- dittoPlotVarsAcrossGroups(
+    c(Treg_UP_in),
+    object = bulkCD4,
+    group.by = "Age",
+    x.reorder = 3:1,
+    x.labels = c("F", "UCB", "A"),
+    plots = c("vlnplot","boxplot"),
+    data.type = "relative",
+    main = NULL, jitter.size = 0.3,
+    sub = "Treg-upregulated",
+    boxplot.color = "white",
+    boxplot.fill = FALSE,
+    y.breaks = -1:1,
+    theme = theme_bw(),
+    x.labels.rotate = FALSE,
+    ylab = NULL, xlab = NULL,
+    legend.show = FALSE,
+    vlnplot.lineweight = 0.5) +
+    # Add gene annotations
+    geom_point(
+        data = cord_exp_df,
+        aes(x = grouping, y = z.exp),
+        fill = "black",
+        shape = 15,
+        inherit.aes = FALSE) +
+    ggrepel::geom_text_repel(
+        data = cord_exp_df,
+        aes(x = grouping, y = z.exp, label = gene),
+        fill = "white",
+        direction = "x",
+        inherit.aes = FALSE)# +
+    # geom_path(
+    #     data = all_exp_df,
+    #     aes(x = grouping, y = z.exp, group = gene),
+    #     inherit.aes = FALSE)
+    )
+(pDN <- dittoPlotVarsAcrossGroups(
+    c(Treg_DOWN_in),
+    object = bulkCD4,
+    group.by = "Age",
+    x.reorder = 3:1,
+    x.labels = c("F", "UCB", "A"),
+    plots = c("vlnplot","boxplot"),
+    data.type = "relative",
+    main = NULL, jitter.size = 0.3,
+    sub = "Treg-downregulated",
+    boxplot.color = "white",
+    boxplot.fill = FALSE,
+    y.breaks = -1:1,
+    theme = theme_bw(),
+    x.labels.rotate = FALSE,
+    ylab = NULL, xlab = NULL,
+    legend.show = FALSE,
+    vlnplot.lineweight = 0.5))
+pdf("Comparison-Figs/bulkCD4s_TregSignature_heatmap.pdf", w = 8, h = 4.5)
+gridExtra::grid.arrange(grobs = list(hm[[4]],pUP,pDN),
+    ncol = 7,
+    nrow = 4,
+    layout_matrix = 
+        rbind(c(1,1,1,1,1,1,2,2),
+              c(1,1,1,1,1,1,2,2),
+              c(1,1,1,1,1,1,3,3),
+              c(1,1,1,1,1,1,3,3)))
+dev.off()
+```
+
+```{r}
+# Statistics
+df_TregUP <- dittoPlotVarsAcrossGroups(
+    c(Treg_UP_in),
+    object = bulkCD4,
+    group.by = "Age",
+    data.type = "relative",
+    data.out = TRUE)[[2]]
+df_TregDOWN <- dittoPlotVarsAcrossGroups(
+    c(Treg_DOWN_in),
+    object = bulkCD4,
+    group.by = "Age",
+    data.type = "relative",
+    data.out = TRUE)[[2]]
+# Up
+wilcox.test(df_TregUP$var.data[df_TregUP$grouping=="Cord"], df_TregUP$var.data[df_TregUP$grouping=="Adult"])
+wilcox.test(df_TregUP$var.data[df_TregUP$grouping=="Cord"], df_TregUP$var.data[df_TregUP$grouping=="Fetal"])
+# Down
+wilcox.test(df_TregDOWN$var.data[df_TregDOWN$grouping=="Cord"], df_TregDOWN$var.data[df_TregDOWN$grouping=="Adult"])
+wilcox.test(df_TregDOWN$var.data[df_TregDOWN$grouping=="Cord"], df_TregDOWN$var.data[df_TregDOWN$grouping=="Fetal"])
+```
+
+
