@@ -1,7 +1,7 @@
 ---
 title: "Naive CD4 T cell bulk RNA-seq import and analysis"
 author: "Dan Bunis"
-date: "2/26/2020"
+date: "5/13/2020"
 output:
   html_document:
     toc: true
@@ -14,6 +14,7 @@ library(ggplot2)
 library(dplyr)
 library(DESeq2)
 library(rtracklayer)
+# BiocManager::install("dtm2451/dittoSeq")
 library(dittoSeq)
 library(clusterProfiler)
 library(org.Hs.eg.db)
@@ -85,8 +86,8 @@ remove <- grep("^RPS|^RPL|^MRPS|^MRPL|^MT-", rownames(Counts))
 Counts <- Counts[-remove,]
 ```
 
-## 3) Run DESeq
-```{r}
+## 3) Run DESeq2
+```{r DESeq2}
 dds <- DESeqDataSetFromMatrix(countData = Counts,
                               colData = Samples,
                               design = ~ Age)
@@ -105,9 +106,9 @@ dittoSeq stores the rlog data as a matrix internally in order for visualizations
 
 ## 4) Import data for dittoSeq / make RNAseq object
 
-```{r, echo = T}
-bulkCD4 <- importDESeq2(dds, blind = FALSE)
-DEFAULT <- "bulkCD4"
+```{r dittoSeq, echo = T}
+bulkCD4 <- importDittoBulk(dds)
+assay(bulkCD4, "logcounts") <- assay(DESeq2::normTransform(dds))
 ```
 
 ## 5) Perform PCA analysis
@@ -117,37 +118,56 @@ Genes to use:
 - Expresed in 4/5 samples of each age
 - Top 2500 cv (stdev / mean)
 
-```{r}
+```{r pca calc}
 # Grab all genes
-genes_use <- get.genes(bulkCD4)
+genes_use <- getGenes(bulkCD4)
 # Grab the counts that are non-zero
-counts <- bulkCD4@counts
+counts <- counts(bulkCD4)
 counts_non_zero <- counts>0
 
 # Filter to genes in most samples of each age
-in_fetal <- sapply(1:nrow(counts), function(X) sum(counts_non_zero[X,meta("Age")=="Fetal"])>=4)
-in_cord <- sapply(1:nrow(counts), function(X) sum(counts_non_zero[X,meta("Age")=="Cord"])>=4)
-in_adult <- sapply(1:nrow(counts), function(X) sum(counts_non_zero[X,meta("Age")=="Adult"])>=4)
+in_fetal <- sapply(1:nrow(counts), function(X) sum(counts_non_zero[X,bulkCD4$Age=="Fetal"])>=4)
+in_cord <- sapply(1:nrow(counts), function(X) sum(counts_non_zero[X,bulkCD4$Age=="Cord"])>=4)
+in_adult <- sapply(1:nrow(counts), function(X) sum(counts_non_zero[X,bulkCD4$Age=="Adult"])>=4)
 genes_use <- genes_use[in_fetal & in_cord & in_adult]
 
 # Filter these to the top cv genes
-rlog <- bulkCD4@data
+rlog <- assay(rlog(dds, blind = FALSE))
 means <- rowMeans(rlog)
 sds <- rowSds(rlog)
 cvs <- sds / means
 cvs <- cvs[in_fetal & in_cord & in_adult]
 genes_use <- genes_use[order(cvs, decreasing = TRUE)[1:2500]]
 
-bulkCD4 <- addPrcomp(bulkCD4, prcomp = prcomp(t(bulkCD4@data[genes_use,]), center = TRUE, scale = TRUE))
-dittoDimPlot("Age", bulkCD4, reduction.use = "pca")
+prcomp_obj <- prcomp(t(rlog[genes_use,]), center = TRUE, scale = TRUE)
+
+bulkCD4 <- addPrcomp(bulkCD4, prcomp = prcomp_obj)
+dittoDimPlot(bulkCD4, "Age", reduction.use = "pca")
+```
+
+```{r, fig.height=2.5, fig.width=2.5}
+# Figure 4A component:
+dittoDimPlot(
+    bulkCD4, "Age", reduction.use = "pca",
+    do.ellipse = TRUE,
+    xlab = paste0(
+        "PC1, ",
+        100*round(x=summary(prcomp_obj)$importance[2,1], digits = 3),"%"),
+    ylab = paste0(
+        "PC2, ",
+        100*round(x=summary(prcomp_obj)$importance[2,2], digits = 3),"%"),
+    legend.show = FALSE,
+    main = NULL,
+    theme = theme_bw()
+    ) +  scale_y_continuous(position = 'right')
 ```
 
 ## 6) Extract the Differential Expression results
 
-```{r}
-FvA <- as.data.frame(results(bulkCD4@DEobject, contrast=c("Age","Fetal","Adult")))
-FvC <- as.data.frame(results(bulkCD4@DEobject, contrast=c("Age","Fetal","Cord")))
-CvA <- as.data.frame(results(bulkCD4@DEobject, contrast=c("Age","Cord","Adult")))
+```{r extract DE}
+FvA <- as.data.frame(results(dds, contrast=c("Age","Fetal","Adult")))
+FvC <- as.data.frame(results(dds, contrast=c("Age","Fetal","Cord")))
+CvA <- as.data.frame(results(dds, contrast=c("Age","Cord","Adult")))
 
 #Trim to DE cutoffs
 FvA_padjFC <- FvA[(
@@ -171,18 +191,25 @@ write.csv(CvA_padjFC, row.names = TRUE, quote = FALSE,
 
 ## 7) Heatmap
 
-```{r}
-DEFAULT <- "bulkCD4"
-
+```{r heatmap}
 #Set the universe
 genes_use <-unique(c(rownames(FvA_padjFC),rownames(CvA_padjFC),rownames(FvC_padjFC)))
 
 #Make a naming meta first
-bulkCD4@meta.data$age.names <- as.factor(as.character(meta("Samples")))
-levels(bulkCD4@meta.data$age.names) <- c(paste0("Adult-",1:5),paste0("Fetal-",1:5),paste0("UCB-",1:5))
+bulkCD4$age.names <- as.factor(as.character(meta("Samples", bulkCD4)))
+levels(bulkCD4$age.names) <- c(paste0("Adult-",1:5),paste0("Fetal-",1:5),paste0("UCB-",1:5))
 
 #Now make the heatmap with DBHeatmap
-hm <- dittoHeatmap(genes_use, object = bulkCD4, cell.names.meta = "age.names", show.rownames = FALSE, annotation.metas = "Age", cutree_rows = 5, cutree_cols = 3, treeheight_col = 10)
+hm <- dittoHeatmap(
+  genes_use,
+  object = bulkCD4,
+  assay = "logcounts",
+  cell.names.meta = "age.names",
+  show_rownames = FALSE,
+  annot.by = "Age",
+  cutree_rows = 5,
+  cutree_cols = 3,
+  treeheight_col = 10)
 
 # Extract gene clusters for cluster summary plots
 clust <- cutree(hm$tree_row, k = 5)
@@ -191,13 +218,16 @@ names(clust) <- genes_use
 
 ```{r}
 ### Commented code below showed that internally stored cluster order is actually not 1,2,3,4,5 from top to bottom of the heatmap.
-# dittoHeatmap(genes_use, cell.names.meta = "age.names", highlight.genes = names(clust[clust==1]), annotation.metas = "Age", cutree_rows = 5, cutree_cols = 3, treeheight_col = 10)
-# dittoHeatmap(genes_use, cell.names.meta = "age.names", highlight.genes = names(clust[clust==2]), annotation.metas = "Age", cutree_rows = 5, cutree_cols = 3, treeheight_col = 10)
-# dittoHeatmap(genes_use, cell.names.meta = "age.names", highlight.genes = names(clust[clust==3]), annotation.metas = "Age", cutree_rows = 5, cutree_cols = 3, treeheight_col = 10)
-# dittoHeatmap(genes_use, cell.names.meta = "age.names", highlight.genes = names(clust[clust==4]), annotation.metas = "Age", cutree_rows = 5, cutree_cols = 3, treeheight_col = 10)
-# dittoHeatmap(genes_use, cell.names.meta = "age.names", highlight.genes = names(clust[clust==5]), annotation.metas = "Age", cutree_rows = 5, cutree_cols = 3, treeheight_col = 10)
+# dittoHeatmap(bulkCD4, genes_use, cell.names.meta = "age.names", highlight.genes = names(clust[clust==1]), annot.by = "Age", cutree_rows = 5, cutree_cols = 3, treeheight_col = 10)
+# dittoHeatmap(bulkCD4, genes_use, cell.names.meta = "age.names", highlight.genes = names(clust[clust==2]), annot.by = "Age", cutree_rows = 5, cutree_cols = 3, treeheight_col = 10)
+# dittoHeatmap(bulkCD4, genes_use, cell.names.meta = "age.names", highlight.genes = names(clust[clust==3]), annot.by = "Age", cutree_rows = 5, cutree_cols = 3, treeheight_col = 10)
+# dittoHeatmap(bulkCD4, genes_use, cell.names.meta = "age.names", highlight.genes = names(clust[clust==4]), annot.by = "Age", cutree_rows = 5, cutree_cols = 3, treeheight_col = 10)
+# dittoHeatmap(bulkCD4, genes_use, cell.names.meta = "age.names", highlight.genes = names(clust[clust==5]), annot.by = "Age", cutree_rows = 5, cutree_cols = 3, treeheight_col = 10)
+```
 
+```{r heatmap cluster summaries}
 c1 <- dittoPlotVarsAcrossGroups(
+  bulkCD4,
   names(clust[clust==1]),
   group.by = "Age",
   plots = "vlnplot",
@@ -206,18 +236,18 @@ c1 <- dittoPlotVarsAcrossGroups(
   x.labels = c("F","U","A"),
   x.reorder = c(3,2,1),
   x.labels.rotate = F,
-  main = "Cluster 4",
+  main = "Cluster 1",
   legend.show = F,
   ylab = NULL,
   xlab = NULL,
   sub = paste0(length(clust[clust==1]), " genes"),
   vlnplot.lineweight = 0.5)
-c2 <- dittoPlotVarsAcrossGroups(names(clust[clust==2]), group.by = "Age", plots = "vlnplot", theme = theme_bw(), y.breaks = c(-1,0,1), x.labels = c("F","U","A"), x.reorder = c(3,2,1), x.labels.rotate = F, main = "Cluster 1", legend.show = F, ylab = NULL, xlab = NULL, sub = paste0(length(clust[clust==2]), " genes"), vlnplot.lineweight = 0.5)
-c3 <- dittoPlotVarsAcrossGroups(names(clust[clust==3]), group.by = "Age", plots = "vlnplot", theme = theme_bw(), y.breaks = c(-1,0,1), x.labels = c("F","U","A"), x.reorder = c(3,2,1), x.labels.rotate = F, main = "Cluster 2", legend.show = F, ylab = NULL, xlab = NULL, sub = paste0(length(clust[clust==3]), " genes"), vlnplot.lineweight = 0.5)
-c4 <- dittoPlotVarsAcrossGroups(names(clust[clust==4]), group.by = "Age", plots = "vlnplot", theme = theme_bw(), y.breaks = c(-1,0,1), x.labels = c("F","U","A"), x.reorder = c(3,2,1), x.labels.rotate = F, main = "Cluster 3", legend.show = F, ylab = NULL, xlab = NULL, sub = paste0(length(clust[clust==4]), " genes"), vlnplot.lineweight = 0.5)
-c5 <- dittoPlotVarsAcrossGroups(names(clust[clust==5]), group.by = "Age", plots = "vlnplot", theme = theme_bw(), y.breaks = c(-1,0,1), x.labels = c("F","U","A"), x.reorder = c(3,2,1), x.labels.rotate = F, main = "Cluster 5", legend.show = F, ylab = NULL, xlab = NULL, sub = paste0(length(clust[clust==5]), " genes"),vlnplot.lineweight = 0.5)
+c2 <- dittoPlotVarsAcrossGroups(bulkCD4, names(clust[clust==5]), group.by = "Age", plots = "vlnplot", theme = theme_bw(), y.breaks = c(-1,0,1), x.labels = c("F","U","A"), x.reorder = c(3,2,1), x.labels.rotate = F, main = "Cluster 2", legend.show = F, ylab = NULL, xlab = NULL, sub = paste0(length(clust[clust==5]), " genes"), vlnplot.lineweight = 0.5)
+c3 <- dittoPlotVarsAcrossGroups(bulkCD4, names(clust[clust==3]), group.by = "Age", plots = "vlnplot", theme = theme_bw(), y.breaks = c(-1,0,1), x.labels = c("F","U","A"), x.reorder = c(3,2,1), x.labels.rotate = F, main = "Cluster 3", legend.show = F, ylab = NULL, xlab = NULL, sub = paste0(length(clust[clust==3]), " genes"), vlnplot.lineweight = 0.5)
+c4 <- dittoPlotVarsAcrossGroups(bulkCD4, names(clust[clust==4]), group.by = "Age", plots = "vlnplot", theme = theme_bw(), y.breaks = c(-1,0,1), x.labels = c("F","U","A"), x.reorder = c(3,2,1), x.labels.rotate = F, main = "Cluster 4", legend.show = F, ylab = NULL, xlab = NULL, sub = paste0(length(clust[clust==4]), " genes"), vlnplot.lineweight = 0.5)
+c5 <- dittoPlotVarsAcrossGroups(bulkCD4, names(clust[clust==2]), group.by = "Age", plots = "vlnplot", theme = theme_bw(), y.breaks = c(-1,0,1), x.labels = c("F","U","A"), x.reorder = c(3,2,1), x.labels.rotate = F, main = "Cluster 5", legend.show = F, ylab = NULL, xlab = NULL, sub = paste0(length(clust[clust==2]), " genes"),vlnplot.lineweight = 0.5)
 
-gridExtra::grid.arrange(grobs=list(hm[[4]], c2, c3, c4, c1, c5),
+gridExtra::grid.arrange(grobs=list(hm[[4]], c1, c2, c3, c4, c5),
              ncol = 8,
              nrow = 5,
              layout_matrix = rbind(c(1, 1, 1, 1,1,1,2,2),
@@ -227,8 +257,9 @@ gridExtra::grid.arrange(grobs=list(hm[[4]], c2, c3, c4, c1, c5),
                                    c(1, 1, 1, 1,1,1,6,6))
              )
 
+# Save as pdf
 pdf("bulkCD4s-Figs/Heatmap_ALL_padj05_logFC2_k5.pdf", w=5.3, h=7)
-gridExtra::grid.arrange(grobs=list(hm[[4]], c2, c3, c4, c1, c5),
+gridExtra::grid.arrange(grobs=list(hm[[4]], c1, c2, c3, c4, c5),
              ncol = 8,
              nrow = 5,
              layout_matrix = rbind(c(1, 1, 1, 1,1,1,2,2),
@@ -242,7 +273,7 @@ dev.off()
 
 ## 8) Venn diagram comparing the genes upregulated in each age
 
-```{r}
+```{r venn across ages}
 #Separate the up and down genes
 FETAL_FvA <- rownames(FvA_padjFC[FvA_padjFC$log2FoldChange>0,])
 FETAL_FvC <- rownames(FvC_padjFC[FvC_padjFC$log2FoldChange>0,])
@@ -284,14 +315,14 @@ to.uniprot <- function(input){
 
 ## Gene groups = gene clusters
 
-```{r}
+```{r export gene clusters}
 # 0. Reretrieve the heatmap clusters
 # THIS TIME< NAME THE CLUSTERS BY THEIR ACTUAL ORDER.
-c1_genes <- names(clust[clust==2])
-c2_genes <- names(clust[clust==3])
-c3_genes <- names(clust[clust==4])
-c4_genes <- names(clust[clust==1])
-c5_genes <- names(clust[clust==5])
+c1_genes <- names(clust[clust==1])
+c2_genes <- names(clust[clust==5])
+c3_genes <- names(clust[clust==3])
+c4_genes <- names(clust[clust==4])
+c5_genes <- names(clust[clust==2])
 
 # Save the cluster gene lists for supplemental table.
 write.csv(data.frame(gene = c(c1_genes,c2_genes,c3_genes,c4_genes,c5_genes),
@@ -307,79 +338,22 @@ write.csv(data.frame(gene = c(c1_genes,c2_genes,c3_genes,c4_genes,c5_genes),
 
 With Pathways FDR ≤ 0.05:
 
-### All clusters separately
-
-```{r}
-#Run pathway enrichment:
-c1_ <- enrichKEGG(to.uniprot(c1_genes), organism = "hsa", pvalueCutoff=1, keyType = "uniprot")
-c2_ <- enrichKEGG(to.uniprot(c2_genes), organism = "hsa", pvalueCutoff=1, keyType = "uniprot")
-c3_ <- enrichKEGG(to.uniprot(c3_genes), organism = "hsa", pvalueCutoff=1, keyType = "uniprot")
-c4_ <- enrichKEGG(to.uniprot(c4_genes), organism = "hsa", pvalueCutoff=1, keyType = "uniprot")
-c5_ <- enrichKEGG(to.uniprot(c5_genes), organism = "hsa", pvalueCutoff=1, keyType = "uniprot")
-
-### Plot!
-Comparisons <- c(c1_, c2_, c3_, c4_, c5_)
-names(Comparisons) <- c("cluster 1", "cluster 2", "cluster 3", "cluster 4", "cluster 5")
-# Gather all significant hits
-AllPaths <- unique(unlist(sapply(
-  Comparisons,
-  function(X) X@result$Description[X@result$p.adjust<0.05])))
-# Pick ORDER of Comparisons
-ORDER <- c("cluster 3", "cluster 4", "cluster 5", "cluster 2", "cluster 1")
-###CREATE A FULL PATHWAYS MATRIX
-dat <- data.frame(
-  Pathway = rep(AllPaths,length(Comparisons)),
-  Comparison = c(sapply(names(Comparisons), function(X) rep(X, length(AllPaths)))),
-  FDR = c(sapply(Comparisons, function(X) X@result$p.adjust[match(AllPaths,X@result$Description)])),
-  GR = c(sapply(Comparisons, function(X) X@result$GeneRatio[match(AllPaths,X@result$Description)])),
-  stringsAsFactors = FALSE)
-# There are missing values in the FDRs. I changed these to 1.0 for dataframe generation.
-dat$FDR[is.na(dat$FDR)] <- 1.0
-# Convert the string GR (#/##) to numerical
-dat$GeneRatio <- sapply(seq_along(dat$GR), function(X) eval(parse(text = dat$GR[X])))
-# Make a FDR column that is NA whenever the FDR is greater than cutoff of 0.05
-dat$FDR_cut05 <- NA
-dat$FDR_cut05[dat$FDR<0.05] <- dat$FDR[dat$FDR<0.05]
-# Order the Pathways by clustering based on binary significant yes/no
-dat$FDR_binary <- 1
-dat$FDR_binary[dat$FDR<0.05] <- 0
-mat_r_FDR_binary <- dcast(dat, Pathway ~ Comparison, value.var = c("FDR_binary"))
-dat$Pathway <- factor(dat$Pathway, mat_r_FDR_binary[hclust(dist(mat_r_FDR_binary))$order,1])
-# Order comparisons by previously set ORDER
-dat$Comparison <- factor(dat$Comparison, ORDER)
-
-# Make the plot
-ggplot(data = dat, aes(x = Comparison, y = Pathway, size = GeneRatio, fill = FDR_cut05)) +
-  geom_point(shape = 21, color = "black") +
-  theme_bw() +
-  scale_fill_continuous(
-      name = "FDR",
-      low = "red",
-      high = Lighten("red", percent.change = 0.7),
-      na.value = "white",
-      limits = c(0,0.05)) +
-  ggtitle("Pathway Enrichment") +
-  coord_flip() +
-  theme(axis.text.x = element_text(size = 6, angle = 270, hjust = 0, vjust = 0.5)) +
-  ylab(NULL) + xlab(NULL)
-```
-
 ### Fetal versus Adult grouped clusters
 
-```{r}
+```{r pathways FvA clusters}
 # Run pathways
-cF_ <- enrichKEGG(to.uniprot(c(c1_genes, c2_genes)), organism = "hsa", pvalueCutoff=1, keyType = "uniprot")
-cA_ <- enrichKEGG(to.uniprot(c(c3_genes, c4_genes)), organism = "hsa", pvalueCutoff=1, keyType = "uniprot")
+cF_ <- enrichKEGG(to.uniprot(c(c1_genes, c2_genes, c3_genes)), organism = "hsa", pvalueCutoff=1, keyType = "uniprot")
+cA_ <- enrichKEGG(to.uniprot(c(c4_genes, c5_genes)), organism = "hsa", pvalueCutoff=1, keyType = "uniprot")
 
 ### Plot!
 Comparisons <- c(cF_, cA_)
-names(Comparisons) <- c("Fetal clusters (3,4)", "Adult clusters (1,2)")
+names(Comparisons) <- c("Fetal clusters (1,2,3)", "Adult clusters (4,5)")
 # Gather all significant hits
 AllPaths <- unique(unlist(sapply(
   Comparisons,
   function(X) X@result$Description[X@result$p.adjust<0.05])))
 # Pick ORDER of Comparisons
-ORDER <- c("Fetal clusters (3,4)", "Adult clusters (1,2)")
+ORDER <- c("Fetal clusters (1,2,3)", "Adult clusters (4,5)")
 ###CREATE A FULL PATHWAYS MATRIX
 dat <- data.frame(Pathway = rep(AllPaths,length(Comparisons)),
                   Comparison = c(sapply(names(Comparisons), function(X) rep(X, length(AllPaths)))),
@@ -433,7 +407,7 @@ write.table(export_horizontal, row.names = FALSE, quote = FALSE, file = "bulkCD4
 
 ## Gene groups = Pairwise age comparisons
 
-```{r}
+```{r pathways pairwise DEG}
 #Separate the up and down genes
 FETAL_FvA <- rownames(FvA_padjFC[FvA_padjFC$log2FoldChange>0,])
 FETAL_FvC <- rownames(FvC_padjFC[FvC_padjFC$log2FoldChange>0,])
@@ -467,7 +441,7 @@ With Pathways FDR ≤ 0.05:
 
 ### Full List
 
-```{r}
+```{r pathways pairwise DEG 2}
 ### Plot!
 Comparisons <- c(fetal_FvA_, cord_CvA_, adult_FvA_, cord_FvC_, adult_CvA_, fetal_FvC_)
 names(Comparisons) <- c("Fetal up vs Adult", "UCB up vs Adult", "Adult up vs Fetal", "UCB up vs Fetal", "Adult up vs UCB", "Fetal up vs UCB")
@@ -527,7 +501,7 @@ write.table(export_horizontal, row.names = FALSE, quote = FALSE, sep = "\t", fil
 
 ### Signaling Pathways
 
-```{r}
+```{r pathways signaling}
 ### Signaling Pathways Only
 SignalingPaths <- AllPaths[grep("signal",AllPaths)]
 dat_sig <- dat[dat$Pathway %in% SignalingPaths,]
@@ -552,7 +526,7 @@ dev.off()
 
 #### Determine estrogen signaling pathway genes DE btwn fetal and UCB
 
-```{r}
+```{r estrogen signaling pathway}
 to.symbol <- function(input){
   uniprot <- bitr_kegg(input, fromType = "kegg", toType = "uniprot", organism = "hsa")
   unique(bitr(uniprot[,2], fromType = "UNIPROT", toType = c("SYMBOL"), OrgDb = org.Hs.eg.db)[,2])
@@ -573,7 +547,7 @@ FvC_padjFC[rownames(FvC_padjFC) %in% estrogen.genes & FvC_padjFC$log2FoldChange<
 
 ### Immune-related but not directly infection-related
 
-```{r}
+```{r pathways immune}
 ### Immune-related Pathways Only
 NonSigNonCancerPaths <- AllPaths[!grepl("signal|cancer|oma$",AllPaths)]
 ImmunePaths_noInf <- NonSigNonCancerPaths[-c(1,3,5:11,13:19,20,22,24,25,27:36,39,42,43,48,49,55,57:63,65:67)]
@@ -599,6 +573,6 @@ dev.off()
 
 # 10) Save
 
-```{r}
+```{r save bulkSCE}
 saveRDS(bulkCD4, file = "bulkCD4.rds")
 ```

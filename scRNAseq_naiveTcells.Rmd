@@ -33,7 +33,6 @@ use_condaenv("r-reticulate")
 
 ```{r}
 Tcells <- CreateSeuratObject(Read10X("Tcells/cellranger_Raw/"))
-DEFAULT <- "Tcells"
 
 #Count and add percent.mito meta
 Tcells[["percent.mito"]] <- PercentageFeatureSet(Tcells, pattern = "^MT-")
@@ -48,19 +47,6 @@ Subset to only cells:
 - with at least 750 genes
 - with at least 1500 UMIs
 - with less than 5% mitochondrial UMIs
-
-```{r}
-# These lines can be used to view the raw data before subsetting was performed
-# (note: there are many empty droplets.)
-# multiDBPlot(
-#     c("nFeature_RNA", "nCount_RNA","percent.mito", "percent.ribo"),
-#     group.by = "orig.ident", color.by = "orig.ident", plots = "vlnplot",
-#     ncol = 2)
-# dittoScatterPlot("nFeature_RNA", "nCount_RNA", overlay.color.var = "percent.mito",
-#                  max = 20) +
-#     geom_hline(yintercept = 1500) +
-#     geom_vline(xintercept = 750)
-```
 
 ```{r}
 # FILTER by minimum #genes
@@ -78,11 +64,12 @@ Tcells.cut
 The data wass generated with three separate 10X lanes, labeled here as CD4, CD4-8, and CD8
 
 ```{r}
-Tcells.cut <- importDemux2Seurat(Tcells.cut,
-                                 Demuxlet.best = c("Tcells/Demuxlet/CD4.best",
-                                   "Tcells/Demuxlet/CD4-8.best",
-                                   "Tcells/Demuxlet/CD8.best"),
-                                 lane.names = c("CD4","CD4-8","CD8"), bypass.check = TRUE)
+Tcells.cut <- importDemux(
+  Tcells.cut,
+  demuxlet.best = c("Tcells/Demuxlet/CD4.best",
+                    "Tcells/Demuxlet/CD4-8.best",
+                    "Tcells/Demuxlet/CD8.best"),
+  lane.names = c("CD4","CD4-8","CD8"))
 
 #Remove the "CD4_" at the start of all my sample names due to coming from RNAseq data with those names.
 Tcells.cut[["Sample"]] <- sapply(
@@ -93,14 +80,13 @@ Tcells.cut[["Sample"]] <- sapply(
 ## Assessmeent of Demuxlet success (before trimming out doublets)
 
 ```{r}
-DEFAULT <- "Tcells.cut"
 demux.SNP.summary(
-    "Tcells.cut",
+    Tcells.cut,
     plots = c("jitter","vlnplot","boxplot"),
     boxplot.color = "white",
     boxplot.fill = F,
     add.line = 50)
-demux.calls.summary("Tcells.cut", singlets.only = FALSE)
+demux.calls.summary(Tcells.cut, singlets.only = FALSE)
 ```
 
 The average SNP count per cell given above is quite high compared to the minimum SNPs required for making highly informed, accurate calls.
@@ -112,46 +98,44 @@ Tcells <- subset(Tcells.cut, subset = demux.doublet.call == "SNG")
 table(meta("Lane", Tcells), meta("Sample", Tcells))
 ```
 
-We can also see, is that there are very few cells called as samples that were not included in their lanes.  (The 1 in APB1804, Lane3).  We'll remove this cell just a bit later
+We can also see, is that there are very few cells called as samples that were not included in their lanes.  (The 1 in APB4, Lane3).  We'll remove this cell just a bit later
 
 ## Add some extra meta datas:
 
 ```{r}
-DEFAULT <- "Tcells"
-
 # Add Age
 Tcells@meta.data$age <- "unknown"
-Tcells@meta.data$age[grep("FS",meta("Sample"))] <- "fetal"
-Tcells@meta.data$age[grep("SLVR",meta("Sample"))] <- "cord"
-Tcells@meta.data$age[grep("APB",meta("Sample"))] <- "adult"
+Tcells@meta.data$age[grep("FS",Tcells$Sample)] <- "fetal"
+Tcells@meta.data$age[grep("UCB",Tcells$Sample)] <- "cord"
+Tcells@meta.data$age[grep("APB",Tcells$Sample)] <- "adult"
 
 # Add Tcelltype
     # This is dependent on both sample-assignment and 10X-lane, so I will need to add how samples were added to each lane
-    samples.4 <- c("FS1849", "FS1850", "FS1851", "SLVR007", "SLVR011", "SLVR063", "APB1801", "APB1802", "APB1804", "APB1805")
-    samples.8 <- c("FS1845", "FS1851", "SLVR011", "SLVR018", "SLVR026", "SLVR063", "APB1802", "APB1803", "APB1805")
-    samples.48.4 <- c("FS1845", "FS1848", "SLVR026", "SLVR018", "APB1803") 
-    samples.48.8 <- c("FS1849", "SLVR007", "APB1801", "APB1804")
+    samples.4 <- c("FS3", "FS4", "FS5", "UCB1", "UCB2", "UCB5", "APB1", "APB2", "APB4", "APB5")
+    samples.8 <- c("FS1", "FS5", "UCB2", "UCB3", "UCB4", "UCB5", "APB2", "APB3", "APB5")
+    samples.48.4 <- c("FS1", "FS2", "UCB4", "UCB3", "APB3") 
+    samples.48.8 <- c("FS3", "UCB1", "APB1", "APB4")
     samples.48 <- c(samples.48.4,samples.48.8)
 #For all the cells in each Lane, add the Tcelltype to a "Tcelltype" metadata iff the cell is assigned to a sample from its lane, and a singlet
 Tcells@meta.data$Tcelltype <- NA
-Tcells@meta.data$Tcelltype[(meta("Sample")%in%samples.4) & (meta("Lane")=="CD4")] <- "CD4"
-Tcells@meta.data$Tcelltype[(meta("Sample")%in%samples.48.4) & (meta("Lane")=="CD4-8")] <- "CD4"
-Tcells@meta.data$Tcelltype[(meta("Sample")%in%samples.8) & (meta("Lane")=="CD8")] <- "CD8"
-Tcells@meta.data$Tcelltype[(meta("Sample")%in%samples.48.8) & (meta("Lane")=="CD4-8")] <- "CD8"
+Tcells@meta.data$Tcelltype[(Tcells$Sample%in%samples.4) & (Tcells$Lane=="CD4")] <- "CD4"
+Tcells@meta.data$Tcelltype[(Tcells$Sample%in%samples.48.4) & (Tcells$Lane=="CD4-8")] <- "CD4"
+Tcells@meta.data$Tcelltype[(Tcells$Sample%in%samples.8) & (Tcells$Lane=="CD8")] <- "CD8"
+Tcells@meta.data$Tcelltype[(Tcells$Sample%in%samples.48.8) & (Tcells$Lane=="CD4-8")] <- "CD8"
 
 #Add a Tage metadata so that I can plot things with the ages and CD4s vs CD8s separately:
 Tcells@meta.data$Tage <- NA
-Tcells@meta.data$Tage[meta("Tcelltype")=="CD4"&!is.na(meta("Tcelltype"))] <- paste0("4-",meta("age")[meta("Tcelltype")=="CD4"&!is.na(meta("Tcelltype"))])
-Tcells@meta.data$Tage[meta("Tcelltype")=="CD8"&!is.na(meta("Tcelltype"))] <- paste0("8-",meta("age")[meta("Tcelltype")=="CD8"&!is.na(meta("Tcelltype"))])
+Tcells@meta.data$Tage[Tcells$Tcelltype=="CD4"&!is.na(Tcells$Tcelltype)] <- paste0("4-",Tcells$age[Tcells$Tcelltype=="CD4"&!is.na(Tcells$Tcelltype)])
+Tcells@meta.data$Tage[Tcells$Tcelltype=="CD8"&!is.na(Tcells$Tcelltype)] <- paste0("8-",Tcells$age[Tcells$Tcelltype=="CD8"&!is.na(Tcells$Tcelltype)])
 ```
 
 ## Subset based on cells being called to a sample from their lane:
 
 ```{r}
 # The NA needs to be changed to a value first for Seurat's subset function.
-sum(is.na(meta("Tage")))
-Tcells@meta.data$Tage[is.na(meta("Tage"))] <- "0"
-sum(meta("Tage")=="0")
+sum(is.na(Tcells$Tage))
+Tcells@meta.data$Tage[is.na(Tcells$Tage)] <- "0"
+sum(Tcells$Tage=="0")
 Tcells <- subset(Tcells, subset = Tage != "0")
 ```
 
@@ -159,7 +143,10 @@ Tcells <- subset(Tcells, subset = Tage != "0")
 
 ```{r}
 ###Add Cell Cycle
-#From Seurat vignette at https://satijalab.org/seurat/cell_cycle_vignette.html#assign-cell-cycle-scores
+#From Seurat vignette at:
+# https://satijalab.org/seurat/cell_cycle_vignette.html#assign-cell-cycle-scores
+# Currently at least, the files are stored here:
+# https://www.dropbox.com/s/3dby3bjsaf5arrw/cell_cycle_vignette_files.zip?dl=1
 # `The file for the readtable line can be downloaded from the Seurat cell cycle vignette.
 exp.mat <- read.table(file = "nestorawa_forcellcycle_expressionMatrix.txt",
     header = TRUE, 
@@ -178,32 +165,33 @@ Idents(Tcells) <- "Lane"
 ## Visualize after filtering
 
 ```{r}
-multi_dittoPlot(
+multi_dittoPlot(Tcells,
     c("nFeature_RNA", "nCount_RNA","percent.mito"),
     group.by = "orig.ident",
     plots = "vlnplot")
 # Better examined with:
-dittoScatterPlot("nFeature_RNA", "nCount_RNA", color.var = "percent.mito",
+dittoScatterPlot(Tcells,
+                 "nFeature_RNA", "nCount_RNA", color.var = "percent.mito",
                  max = 20) +
     geom_hline(yintercept = 1500) +
     geom_vline(xintercept = 750)
-demux.SNP.summary(
+demux.SNP.summary(Tcells,
     plots = c("jitter","vlnplot","boxplot"),
     boxplot.color = "white",
     boxplot.fill = F,
     add.line = 50)
-hold <- meta("Lane")
+hold <- Tcells$Lane
 Tcells@meta.data$Lane <- factor(
-  meta("Lane"),
+  Tcells$Lane,
   levels = c("CD4","CD4-8","CD8"),
   labels = c("Lane1", "Lane2", "Lane3"))
-demux.calls.summary(xlab = NULL) +
+demux.calls.summary(Tcells, xlab = NULL) +
     theme(axis.text.x = element_text(size = 9)) +
     theme(axis.text.y = element_text(size = 9)) +
     theme(axis.title.y = element_text(size = 10)) +
     theme(plot.title = element_text(size = 10))
 Tcells@meta.data$Lane <- hold
-table(meta("Sample"),meta("Lane"),meta("Tcelltype"))
+table(Tcells$Sample,Tcells$Lane,Tcells$Tcelltype)
 ```
 
 # 5. Data Pre-processing
@@ -258,7 +246,7 @@ Tcells <- ScoreJackStraw(Tcells, dims = 1:20)
 JackStrawPlot(object = Tcells, dims = 1:20)
 ```
 
-The large change in p value magnitude from 9 to 10, and 9 pcs being around an inflection point in the elbow plot went into my picking PCs1-9 for tSNE and clustering.
+The large change in p value magnitude from 9 to 10, and 9 pcs being around an inflection point in the elbow plot went into our picking PCs1-9 for tSNE and clustering.
 
 # 7. Run tSNE
 ```{r tSNE}
@@ -268,7 +256,7 @@ Tcells <- RunTSNE(
   dims = 1:9,
   seed.use = 1)
 
-dittoDimPlot("Tage", size = 2)
+dittoDimPlot(Tcells, "Tage", size = 2, reduction.use = "tsne")
 ```
 
 # 8. Run clustering
@@ -277,10 +265,6 @@ Tcells <- FindNeighbors(Tcells,
                         reduction = "pca",
                         k.param = 20,
                         dims = 1:9)
-# Tcells <- FindClusters(Tcells,
-#                        modularity.fxn = 1,
-#                        algorithm = 1,
-#                        resolution = c(seq(0.1,1,0.1)))
 Tcells <- FindClusters(Tcells,
                        modularity.fxn = 1,
                        algorithm = 1,
@@ -298,46 +282,45 @@ Tcells <- RunUMAP(
 ```
 
 ```{r}
-DEFAULT <- "Tcells"
 #Colored with CD4s lighter and CD8s darker 
-dittoDimPlot("Tage", Tcells, size = 1, reduction.use = "umap",
+dittoDimPlot(Tcells, "Tage", size = 1, reduction.use = "umap",
           colors = c(1:3,9:11), main = "T cells Lineage and Stage",
-          rename.var.groups = c("Adult-CD4", "UCB-CD4", "Fetal-CD4",
-                            "Adult-CD8", "UCB-CD8","Fetal-CD8"))
+          rename.var.groups = c("Adult-CD4", "Fetal-CD4", "UCB-CD4",
+                            "Adult-CD8", "Fetal-CD8", "UCB-CD8"))
 
 plots <- list(
-    dittoDimPlot(
-        "Tage", size = 0.5, reduction.use = "umap", cells.use = meta("Tage")=="4-adult",
+    dittoDimPlot(Tcells,
+        "Tage", size = 0.5, reduction.use = "umap", cells.use = Tcells$Tage=="4-adult",
         colors = 1, legend.show = FALSE, ylab = NULL, xlab = NULL, main = NULL,
         show.axes.numbers = FALSE),
-    dittoDimPlot(
-        "Tage", size = 0.5, reduction.use = "umap", cells.use = meta("Tage")=="4-cord",
+    dittoDimPlot(Tcells,
+        "Tage", size = 0.5, reduction.use = "umap", cells.use = Tcells$Tage=="4-cord",
         colors = 2, legend.show = FALSE, ylab = NULL, xlab = NULL, main = NULL,
         show.axes.numbers = FALSE),
-    dittoDimPlot(
-        "Tage", size = 0.5, reduction.use = "umap", cells.use = meta("Tage")=="4-fetal",
+    dittoDimPlot(Tcells,
+        "Tage", size = 0.5, reduction.use = "umap", cells.use = Tcells$Tage=="4-fetal",
         colors = 3, legend.show = FALSE, ylab = NULL, xlab = NULL, main = NULL,
         show.axes.numbers = FALSE),
-    dittoDimPlot(
-        "Tage", size = 0.5, reduction.use = "umap", cells.use = meta("Tage")=="8-adult",
+    dittoDimPlot(Tcells,
+        "Tage", size = 0.5, reduction.use = "umap", cells.use = Tcells$Tage=="8-adult",
         colors = 9, legend.show = FALSE, ylab = NULL, xlab = NULL, main = NULL,
         show.axes.numbers = FALSE),
-    dittoDimPlot(
-        "Tage", size = 0.5, reduction.use = "umap", cells.use = meta("Tage")=="8-cord",
+    dittoDimPlot(Tcells,
+        "Tage", size = 0.5, reduction.use = "umap", cells.use = Tcells$Tage=="8-cord",
         colors = 10, legend.show = FALSE, ylab = NULL, xlab = NULL, main = NULL,
         show.axes.numbers = FALSE),
-    dittoDimPlot(
-        "Tage", size = 0.5, reduction.use = "umap", cells.use = meta("Tage")=="8-fetal",
+    dittoDimPlot(Tcells,
+        "Tage", size = 0.5, reduction.use = "umap", cells.use = Tcells$Tage=="8-fetal",
         colors = 11, legend.show = FALSE, ylab = NULL, xlab = NULL, main = NULL,
         show.axes.numbers = FALSE),
-    dittoDimPlot(
+    dittoDimPlot(Tcells,
         "Tage", size = 1, reduction.use = "umap", legend.show = FALSE,
         color.panel = dittoColors()[c(1:3,9:11)], main = NULL),
-    dittoSeq:::.grab_legend(dittoDimPlot(
+    dittoSeq:::.grab_legend(dittoDimPlot(Tcells,
         "Tage", size = 1, reduction.use = "umap",
         color.panel = dittoColors()[c(1:3,9:11)],
-        rename.var.groups = c("CD4-adult", "CD4-UCB", "CD4-fetal",
-                              "CD8-adult", "CD8-UCB", "CD8-fetal")))
+        rename.var.groups = c("Adult-CD4", "Fetal-CD4", "UCB-CD4",
+                              "Adult-CD8", "Fetal-CD8", "UCB-CD8")))
 )
 pdf("Tcells-Figs/Tcell_umap_surround.pdf", w=6, h=6)
 gridExtra::grid.arrange(grobs = plots,
@@ -352,21 +335,21 @@ dev.off()
 #10 Quantify Clustering
 
 ```{r}
-age.clust <- factor(meta("RNA_snn_res.0.1"), labels = c("adult-cluster", "cord-cluster", "fetal-cluster"))
+age.clust <- factor(Tcells$RNA_snn_res.0.1, labels = c("adult-cluster", "UCB-cluster", "fetal-cluster"))
 Tcells@meta.data$age.cluster <- as.character(age.clust)
 Idents(Tcells) <- "age.cluster"
 
 pdf("Tcells-Figs/Clustering-umap_small.pdf", width = 3, height = 1.5)
-dittoDimPlot(size=0.3, do.label = FALSE, main = NULL,
+dittoDimPlot(Tcells, "ident", size=0.3, do.label = FALSE, main = NULL, colors = c(1,3,2),
     xlab = NULL, ylab = NULL, show.axes.numbers = FALSE, reduction.use = "umap",
-    rename.var.groups = c("adult-cluster", "UCB-cluster", "fetal-cluster"))
+    rename.var.groups = c("adult-cluster", "fetal-cluster", "UCB-cluster"))
 dev.off()
 
 pdf("Tcells-Figs/Clustering-4s.pdf", width = 4, height = 1.7)
-dittoBarPlot("ident", group.by = "Sample",
+dittoBarPlot(Tcells, "ident", group.by = "Sample",
           x.reorder = c(6:10,11:15,1:5),
           main = NULL,
-          cells.use = meta("Tcelltype")=="CD4",
+          cells.use = Tcells$Tcelltype=="CD4",
           ylab = "Fraction of CD4\nin each cluster",
           legend.show = FALSE, legend.title = "Clusters",
           x.labels = c(paste0("F",1:5),paste0("U",1:5),paste0("A",1:5)),
@@ -375,10 +358,10 @@ dittoBarPlot("ident", group.by = "Sample",
 dev.off()
 
 pdf("Tcells-Figs/Clustering-8s.pdf", width = 4, height = 1.7)
-dittoBarPlot("ident", group.by = "Sample",
+dittoBarPlot(Tcells, "ident", group.by = "Sample",
           x.reorder = c(6:8,9:13,1:5),
           main = NULL,
-          cells.use = meta("Tcelltype")=="CD8",
+          cells.use = Tcells$Tcelltype=="CD8",
           ylab = "Fraction of CD8\nin each cluster",
           legend.show = FALSE, legend.title = "Clusters",
           x.labels = c(paste0("F",1:5),paste0("U",1:5),paste0("A",1:5))[c(1,3,5:15)],
@@ -387,30 +370,30 @@ dittoBarPlot("ident", group.by = "Sample",
 dev.off()
 
 # Percentage of fetal cells in fetal-cluster
-sum(meta("ident")=="fetal-cluster" & meta("age")=="fetal") / sum(meta("age")=="fetal")
+sum(meta("ident",Tcells)=="fetal-cluster" & Tcells$age=="fetal") / sum(Tcells$age=="fetal")
 
 # Percentage of UCB cells in UCB-cluster
-sum(meta("ident")=="cord-cluster" & meta("age")=="cord") / sum(meta("age")=="cord")
+sum(meta("ident",Tcells)=="UCB-cluster" & Tcells$age=="cord") / sum(Tcells$age=="cord")
 
 # Percentage of adult cells in adult-cluster
-sum(meta("ident")=="adult-cluster" & meta("age")=="adult") / sum(meta("age")=="adult")
+sum(meta("ident",Tcells)=="adult-cluster" & Tcells$age=="adult") / sum(Tcells$age=="adult")
 
 # Total percentage matching their age
-(sum(meta("ident")=="fetal-cluster" & meta("age")=="fetal") +
-    sum(meta("ident")=="cord-cluster" & meta("age")=="cord") +
-    sum(meta("ident")=="adult-cluster" & meta("age")=="adult")) /
+(sum(meta("ident",Tcells)=="fetal-cluster" & Tcells$age=="fetal") +
+    sum(meta("ident",Tcells)=="UCB-cluster" & Tcells$age=="cord") +
+    sum(meta("ident",Tcells)=="adult-cluster" & Tcells$age=="adult")) /
     length(colnames(Tcells))
 
 # Total percent UCB samples' cells in UCB cluster, CD4s
 x <- table(
-  meta("Sample")[meta("age")=="cord" & meta("Tcelltype")=="CD4"],
-  meta("age.cluster")[meta("age")=="cord" & meta("Tcelltype")=="CD4"])
+  Tcells$Sample[Tcells$age=="cord" & Tcells$Tcelltype=="CD4"],
+  Tcells$age.cluster[Tcells$age=="cord" & Tcells$Tcelltype=="CD4"])
 x[,2]/rowSums(x)
 
 # Total percent UCB samples' cells in UCB cluster, CD8s
 y <- table(
-  meta("Sample")[meta("age")=="cord" & meta("Tcelltype")=="CD8"],
-  meta("age.cluster")[meta("age")=="cord" & meta("Tcelltype")=="CD8"])
+  Tcells$Sample[Tcells$age=="cord" & Tcells$Tcelltype=="CD8"],
+  Tcells$age.cluster[Tcells$age=="cord" & Tcells$Tcelltype=="CD8"])
 y[,2]/rowSums(y)
 
 # Mean of number of cells per UCB sample, per T cell lineage, clustering as UCB 
@@ -468,12 +451,12 @@ Idents(Tcells) <- "age"
 inTraining <- createDataPartition(Idents(Tcells), p=0.1, list = FALSE)
 #Trim to adult and fetal indices
 inTraining <- inTraining[Idents(Tcells)[inTraining]%in%c("fetal","adult")]
-sum(meta("age")[inTraining]=="adult")/sum(meta("age")[inTraining]%in%c("fetal", "adult"))
-sum(meta("ident")=="adult")/sum(meta("ident")%in%c("fetal", "adult"))
+sum(Tcells$age[inTraining]=="adult")/sum(Tcells$age[inTraining]%in%c("fetal", "adult"))
+sum(meta("ident",Tcells)=="adult")/sum(meta("ident",Tcells)%in%c("fetal", "adult"))
 
 ### 2. Obtain markers
 # Set Idents to 0 for non-training cells
-age.inTrain <- meta("age")
+age.inTrain <- Tcells$age
 age.inTrain[-inTraining] <- 0
 # age.inTrain[inTraining]
 Idents(Tcells) <- age.inTrain
@@ -492,7 +475,7 @@ markers <- rownames(FvA_padjFC)
 training <- as.matrix(t(GetAssayData(Tcells)[markers,inTraining]))
 # Creating the outcome score values
 Train_val <- array(1, length(inTraining))
-Train_val[meta("age")[inTraining]=="fetal"] <- 0
+Train_val[Tcells$age[inTraining]=="fetal"] <- 0
 #Run feseR correlation step
 training.trim <- filter.corr(scale(training), Train_val, mincorr = 0.3)
 #Run feseR random forest step
@@ -536,7 +519,7 @@ markers.feser <- vars.use
 training <- as.matrix(t(GetAssayData(Tcells)[markers.feser,inTraining]))
 # Creating the outcome score values
 Train_val <- array(1, length(inTraining))
-Train_val[meta("age")[inTraining]=="fetal"] <- 0
+Train_val[Tcells$age[inTraining]=="fetal"] <- 0
 # Make the model
 rf_mod <- train(Train_val ~ .,
               set.seed(998),
@@ -559,16 +542,16 @@ Tcells@meta.data$inTraining[inTraining] <- TRUE
 ### 6. Score FvA accuracy
 # Set ident back to full age.
 Idents(Tcells) <- "age"
-roc_obj <- roc(response = as.numeric(meta("ident")[!(meta("inTraining")) &
-                                                   meta("ident")%in%c("fetal", "adult")]=="adult"),
-               predictor = meta("RFScore")[!(meta("inTraining")) &
-                                               meta("ident")%in%c("fetal", "adult")],
+roc_obj <- roc(response = as.numeric(meta("ident",Tcells)[!(Tcells$inTraining) &
+                                                   meta("ident",Tcells)%in%c("fetal", "adult")]=="adult"),
+               predictor = Tcells$RFScore[!(Tcells$inTraining) &
+                                               meta("ident",Tcells)%in%c("fetal", "adult")],
                plot = T)
 auc(roc_obj)
 ```
 
 ```{r}
-dittoPlot("RFScore", cells.use = meta("inTraining"),
+dittoPlot(Tcells, "RFScore", cells.use = Tcells$inTraining,
        group.by = "Sample", color.by = "age",
        plots = c("jitter","vlnplot"),
        boxplot.color = "white", boxplot.fill = F,
@@ -576,25 +559,25 @@ dittoPlot("RFScore", cells.use = meta("inTraining"),
        sub = "in Training", colors = c(1,3))
 
 ### 7. Check the look for all T cells.
-dittoPlot("RFScore", cells.use = !(meta("inTraining")),
+dittoPlot(Tcells, "RFScore", cells.use = !(Tcells$inTraining),
        group.by = "Sample", color.by = "age",
        plots = c("jitter","vlnplot"),
        boxplot.color = "white", boxplot.fill = F,
        vlnplot.lineweight = 0.3, vlnplot.width = 5,
        sub = "NOT in training")
-dittoDimPlot("RFScore", cells.use = !(meta("inTraining")),
+dittoDimPlot(Tcells, "RFScore", cells.use = !(Tcells$inTraining),
              sub = "NOT in training", size = 2, reduction.use = "umap")
 ```
 
 
 ```{r}
 pdf("Tcells-Figs/Tcell_train-umap.pdf", w=1.38, h=1.3)
-dittoDimPlot("age", colors = c(1,3), cells.use = meta("inTraining"), main = NULL,
+dittoDimPlot(Tcells, "age", colors = c(1,3), cells.use = Tcells$inTraining, main = NULL,
              xlab = NULL, ylab = NULL, legend.show = FALSE, size = 0.3, reduction.use = "umap",
              show.axes.numbers = FALSE)
 dev.off()
 pdf("Tcells-Figs/Tcell_extend-umap.pdf", w=3.1, h=1.7)
-dittoDimPlot("RFScore", colors = c(1,3), main = NULL,
+dittoDimPlot(Tcells, "RFScore", colors = c(1,3), main = NULL,
              xlab = NULL, ylab = NULL, legend.show = TRUE, size = 0.5,
              legend.breaks = c(0,0.5,1), legend.breaks.labels = c("0, fetal-like", "0.5", "1, adult-like"),
              reduction.use = "umap", show.axes.numbers = FALSE)
@@ -603,8 +586,8 @@ dev.off()
 
 ```{r}
 pdf("Tcells-Figs/RFScore-4s.pdf", width = 6, height = 3)
-dittoPlot("RFScore", group.by = "Sample", color.by = "age",
-       cells.use = meta("Tcelltype")=="CD4",
+dittoPlot(Tcells, "RFScore", group.by = "Sample", color.by = "age",
+       cells.use = Tcells$Tcelltype=="CD4",
        plots = c("jitter","vlnplot"),
        boxplot.color = "white", boxplot.fill = F, boxplot.width = 0.4,
        jitter.size = 0.3,
@@ -619,8 +602,8 @@ dittoPlot("RFScore", group.by = "Sample", color.by = "age",
        )
 dev.off()
 pdf("Tcells-Figs/RFScore-8s.pdf", width = 6, height = 3)
-dittoPlot("RFScore", group.by = "Sample", color.by = "age",
-       cells.use = meta("Tcelltype")=="CD8",
+dittoPlot(Tcells, "RFScore", group.by = "Sample", color.by = "age",
+       cells.use = Tcells$Tcelltype=="CD8",
        plots = c("jitter","vlnplot"),
        boxplot.color = "white", boxplot.fill = F, boxplot.width = 0.4,
        jitter.size = 0.3,
@@ -641,38 +624,38 @@ dev.off()
 ```{r}
 # Scores less than 0.1
   # fetal
-sum((meta("RFScore")<0.1 & meta("age")=="fetal")) / sum(meta("age")=="fetal")
+sum((Tcells$RFScore<0.1 & Tcells$age=="fetal")) / sum(Tcells$age=="fetal")
   # cord
-sum((meta("RFScore")<0.1 & meta("age")=="cord")) / sum(meta("age")=="cord")
+sum((Tcells$RFScore<0.1 & Tcells$age=="cord")) / sum(Tcells$age=="cord")
   # adult
-sum((meta("RFScore")<0.1 & meta("age")=="adult")) / sum(meta("age")=="adult")
+sum((Tcells$RFScore<0.1 & Tcells$age=="adult")) / sum(Tcells$age=="adult")
 
 # Scores between 0.1 and 0.9
   # fetal
-sum((meta("RFScore")>=0.1 & meta("RFScore")<=0.9 & meta("age")=="fetal")) / sum(meta("age")=="fetal")
+sum((Tcells$RFScore>=0.1 & Tcells$RFScore<=0.9 & Tcells$age=="fetal")) / sum(Tcells$age=="fetal")
   # cord
-sum((meta("RFScore")>=0.1 & meta("RFScore")<=0.9 & meta("age")=="cord")) / sum(meta("age")=="cord")
+sum((Tcells$RFScore>=0.1 & Tcells$RFScore<=0.9 & Tcells$age=="cord")) / sum(Tcells$age=="cord")
   # adult
-sum((meta("RFScore")>=0.1 & meta("RFScore")<=0.9 & meta("age")=="adult")) / sum(meta("age")=="adult")
+sum((Tcells$RFScore>=0.1 & Tcells$RFScore<=0.9 & Tcells$age=="adult")) / sum(Tcells$age=="adult")
 
 # Scores greater than 0.9
   # fetal
-sum((meta("RFScore")>0.9 & meta("age")=="fetal")) / sum(meta("age")=="fetal")
+sum((Tcells$RFScore>0.9 & Tcells$age=="fetal")) / sum(Tcells$age=="fetal")
   # cord
-sum((meta("RFScore")>0.9 & meta("age")=="cord")) / sum(meta("age")=="cord")
+sum((Tcells$RFScore>0.9 & Tcells$age=="cord")) / sum(Tcells$age=="cord")
   # adult
-sum((meta("RFScore")>0.9 & meta("age")=="adult")) / sum(meta("age")=="adult")
+sum((Tcells$RFScore>0.9 & Tcells$age=="adult")) / sum(Tcells$age=="adult")
 
 # mean & stdev
   # fetal
-mean(meta("RFScore")[meta("age")=="fetal"])
-sd(meta("RFScore")[meta("age")=="fetal"])
+mean(Tcells$RFScore[Tcells$age=="fetal"])
+sd(Tcells$RFScore[Tcells$age=="fetal"])
   # cord
-mean(meta("RFScore")[meta("age")=="cord"])
-sd(meta("RFScore")[meta("age")=="cord"])
+mean(Tcells$RFScore[Tcells$age=="cord"])
+sd(Tcells$RFScore[Tcells$age=="cord"])
   # adult
-mean(meta("RFScore")[meta("age")=="adult"])
-sd(meta("RFScore")[meta("age")=="adult"])
+mean(Tcells$RFScore[Tcells$age=="adult"])
+sd(Tcells$RFScore[Tcells$age=="adult"])
 ```
 
 ## RF Model Markers expression comparison
@@ -681,7 +664,7 @@ sd(meta("RFScore")[meta("age")=="adult"])
 # Reorder to put UCB~fetal-like genes first and UCB~adult-like genes last
 markers.feser <- markers.feser[c(1,9,12,15,2:4,6,8:10,11,14,17,13,16,5)]
 pdf("Tcells-Figs/RFmarkers_Tcells.pdf", w = 7.5, h = 6.5)
-multi_dittoPlot(markers.feser, group.by = "age", ncol = 5, nrow = 4,
+multi_dittoPlot(Tcells, markers.feser, group.by = "age", ncol = 5, nrow = 4,
     x.reorder = 3:1, x.labels = c("F","U","A"), x.labels.rotate = FALSE,
     vlnplot.lineweight = 0.3, jitter.size = 0.2)
 dev.off()

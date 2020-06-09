@@ -10,7 +10,7 @@ Pre-print manuscript is available at https://papers.ssrn.com/sol3/papers.cfm?abs
 
 ## Current citation:
 
-Daniel Bunis, Yelena Bronevetsky, Elisabeth Krow-Lucal, Nirav R. Bhakta, Charles C. Kim, Srilaxmi Nerella, Norman Jones, Ventura F. Mendoza, Yvonne J. Bryson, James E. Gern, Rachel L. Rutishauser, Chun Jimmie Ye, Marina Sirota, Joseph M. McCune, Trevor D. Burt. "Single-cell mapping of progressive fetal-to-adult transition in human hematopoiesis," manuscript in process, 2020.
+Daniel Bunis, Yelena Bronevetsky, Elisabeth Krow-Lucal, Nirav R. Bhakta, Charles C. Kim, Srilaxmi Nerella, Norman Jones, Ventura F. Mendoza, Yvonne J. Bryson, James E. Gern, Rachel L. Rutishauser, Chun Jimmie Ye, Marina Sirota, Joseph M. McCune, Trevor D. Burt. "Single-cell mapping of progressive fetal-to-adult transition in human naive T cells," manuscript in process, 2020.
 
 ## To use this code
 
@@ -55,6 +55,9 @@ ProgressiveHematopoiesis/
 ```
 
 ### Session info
+
+<details><summary>Click to show/hide</summary>
+<p>
 
 ```
 R version 3.6.2 Patched (2020-01-13 r77669)
@@ -149,3 +152,5 @@ loaded via a namespace (and not attached):
 [181] GenomeInfoDbData_1.2.2        iterators_1.0.12              gtable_0.3.0   
 ```
 
+</p>
+</details>
