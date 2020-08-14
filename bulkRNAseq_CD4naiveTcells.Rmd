@@ -575,4 +575,5 @@ dev.off()
 
 ```{r save bulkSCE}
 saveRDS(bulkCD4, file = "bulkCD4.rds")
+saveRDS(dds, file = "bulkCD4_dds.rds")
 ```
