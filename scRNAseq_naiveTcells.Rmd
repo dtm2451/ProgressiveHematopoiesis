@@ -1,7 +1,7 @@
 ---
 title: "Naive T cell scRNA-seq import and analysis"
 author: "Dan Bunis"
-date: "2/26/2020"
+date: "9/28/2020"
 output:
   html_document:
     toc: true
@@ -10,14 +10,12 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, fig.height = 6, fig.width = 7, warning = F)
-# devtools::install_version(package = "Seurat", version = "3.0.2")
-# install.packages("Seurat")
-library(Seurat)
 library(MAST)
-# BiocManager::install("dtm2451/DittoSeq@v0.3")
+# BiocManager::install("dtm2451/dittoSeq@a3bfe2b")
 library(dittoSeq)
 library(caret)
 library(ranger)
+# devtools::install_github("vqv/ggbiplot")
 # devtools::install_github("enriquea/feser")
 library(feseR)
 library(pROC)
@@ -25,8 +23,12 @@ library(pROC)
 library(reticulate)
 # use_python("/anaconda3/envs/r-reticulate/bin/python")
 # # Run this in Terminal
-# # conda create -y -c conda-forge -n seurat umap-learn=0.3
-use_condaenv("r-reticulate")
+# # conda create -y -c conda-forge -n r-reticulate umap-learn=0.3.10
+use_condaenv("seurat", required = TRUE)
+# devtools::install_version(package = "adehabitat", version = "1.8.20")
+# devtools::install_version(package = "SDMTools", version = "1.1-221.1")
+# devtools::install_version(package = "Seurat", version = "3.0.2")
+library(Seurat)
 ```
 
 # 1. Import CellRanger output and add some basic metadata.
@@ -99,6 +101,10 @@ table(meta("Lane", Tcells), meta("Sample", Tcells))
 ```
 
 We can also see, is that there are very few cells called as samples that were not included in their lanes.  (The 1 in APB4, Lane3).  We'll remove this cell just a bit later
+
+```{r}
+rm(Tcells.cut)
+```
 
 ## Add some extra meta datas:
 
@@ -233,20 +239,20 @@ Tcells <- RunPCA(
 ## Use PCheatmaps, PCElbowPlot, and JackStrawPlot to pick which PCs to carry forward into tSNE and clustering
 
 ```{r}
-PCHeatmap(
-    object = Tcells,
-    dims = 1:18, 
-    cells = 2000, 
-    balanced = TRUE
-)
-ElbowPlot(object = Tcells)
-#WARNING: JackStraw takes a long time to run.
-Tcells <- JackStraw(object = Tcells, num.replicate = 100, dims = 20, verbose = TRUE)
-Tcells <- ScoreJackStraw(Tcells, dims = 1:20)
-JackStrawPlot(object = Tcells, dims = 1:20)
+# PCHeatmap(
+#     object = Tcells,
+#     dims = 1:18, 
+#     cells = 2000, 
+#     balanced = TRUE
+# )
+# ElbowPlot(object = Tcells)
+# #WARNING: JackStraw takes a long time to run.
+# Tcells <- JackStraw(object = Tcells, num.replicate = 100, dims = 20, verbose = TRUE)
+# Tcells <- ScoreJackStraw(Tcells, dims = 1:20)
+# JackStrawPlot(object = Tcells, dims = 1:20)
 ```
 
-The large change in p value magnitude from 9 to 10, and 9 pcs being around an inflection point in the elbow plot went into our picking PCs1-9 for tSNE and clustering.
+The large change in p value magnitude from 9 to 10, and 9 pcs being around an inflection point in the elbow plot went into our picking PCs1-9 for tSNE, umap, and clustering.
 
 # 7. Run tSNE
 ```{r tSNE}
@@ -319,8 +325,8 @@ plots <- list(
     dittoSeq:::.grab_legend(dittoDimPlot(Tcells,
         "Tage", size = 1, reduction.use = "umap",
         color.panel = dittoColors()[c(1:3,9:11)],
-        rename.var.groups = c("Adult-CD4", "Fetal-CD4", "UCB-CD4",
-                              "Adult-CD8", "Fetal-CD8", "UCB-CD8")))
+        rename.var.groups = c("Adult-CD4", "UCB-CD4", "Fetal-CD4", 
+                              "Adult-CD8", "UCB-CD8", "Fetal-CD8")))
 )
 pdf("Tcells-Figs/Tcell_umap_surround.pdf", w=6, h=6)
 gridExtra::grid.arrange(grobs = plots,
@@ -335,7 +341,7 @@ dev.off()
 #10 Quantify Clustering
 
 ```{r}
-age.clust <- factor(Tcells$RNA_snn_res.0.1, labels = c("adult-cluster", "UCB-cluster", "fetal-cluster"))
+age.clust <- factor(Tcells$RNA_snn_res.0.1, labels = c("adult-cluster", "fetal-cluster", "UCB-cluster"))
 Tcells@meta.data$age.cluster <- as.character(age.clust)
 Idents(Tcells) <- "age.cluster"
 
@@ -408,21 +414,21 @@ FvA <- FindMarkers(Tcells,
                        ident.1 = "fetal",
                        ident.2 = "adult",
                        test.use = "MAST")
-FvA_padjFC <- FvA[abs(FvA$avg_logFC)>=(log2(1.5)) &
+FvA_padjFC <- FvA[abs(FvA$avg_logFC)>=0.585 &
                             FvA$p_val_adj<0.05 &
                             !(is.na(FvA$p_val_adj)),]
 FvC <- FindMarkers(Tcells,
                        ident.1 = "fetal",
                        ident.2 = "cord",
                        test.use = "MAST")
-FvC_padjFC <- FvC[abs(FvC$avg_logFC)>=(log2(1.5)) &
+FvC_padjFC <- FvC[abs(FvC$avg_logFC)>=0.585 &
                             FvC$p_val_adj<0.05 &
                             !(is.na(FvC$p_val_adj)),]
 CvA <- FindMarkers(Tcells,
                        ident.1 = "cord",
                        ident.2 = "adult",
                        test.use = "MAST")
-CvA_padjFC <- CvA[abs(CvA$avg_logFC)>=(log2(1.5)) &
+CvA_padjFC <- CvA[abs(CvA$avg_logFC)>=0.585 &
                            CvA$p_val_adj<0.05 &
                             !(is.na(CvA$p_val_adj)),]
 write.csv(FvA_padjFC, row.names = TRUE, quote = FALSE, file = "Tcells_DiffExp_scFetalvsAdult.csv")
@@ -430,7 +436,7 @@ write.csv(FvC_padjFC, row.names = TRUE, quote = FALSE, file = "Tcells_DiffExp_sc
 write.csv(CvA_padjFC, row.names = TRUE, quote = FALSE, file = "Tcells_DiffExp_scUCBvAdult.csv")
 ```
 
-# 12 Immunological Age Scoring
+# 12 Developmental Stage Scoring
 
 Steps:
 
@@ -465,7 +471,7 @@ FvA <- FindMarkers(Tcells,
                        ident.1 = "fetal",
                        ident.2 = "adult",
                        test.use = "MAST")
-FvA_padjFC <- FvA[abs(FvA$avg_logFC)>=(log2(1.5)) &
+FvA_padjFC <- FvA[abs(FvA$avg_logFC)>=0.585 &
                             FvA$p_val_adj<0.05 &
                             !(is.na(FvA$p_val_adj)),]
 markers <- rownames(FvA_padjFC)
@@ -597,8 +603,8 @@ dittoPlot(Tcells, "RFScore", group.by = "Sample", color.by = "age",
        y.breaks = seq(0,1,.5),
        legend.show = FALSE,
        xlab = NULL,
-       ylab = "Immunological Age Score",
-       main = "Immunological Age Score - Naive CD4 T cells"
+       ylab = "Developmental Stage Score",
+       main = "Developmental Stage Score - Naive CD4 T cells"
        )
 dev.off()
 pdf("Tcells-Figs/RFScore-8s.pdf", width = 6, height = 3)
@@ -613,8 +619,8 @@ dittoPlot(Tcells, "RFScore", group.by = "Sample", color.by = "age",
        y.breaks = seq(0,1,.5),
        legend.show = FALSE,
        xlab = NULL,
-       ylab = "Immunological Age Score",
-       main = "Immunological Age Score - Naive CD8 T cells"
+       ylab = "Developmental Stage Score",
+       main = "Developmental Stage Score - Naive CD8 T cells"
        )
 dev.off()
 ```

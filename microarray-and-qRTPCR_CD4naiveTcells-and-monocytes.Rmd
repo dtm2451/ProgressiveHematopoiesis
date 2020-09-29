@@ -1,7 +1,7 @@
 ---
 title: "Naive CD4 T cell & classical monocyte microarray and qRT-PCR analysis"
 author: "Dan Bunis"
-date: "2/26/2020"
+date: "9/28/2020"
 output:
   html_document:
     toc: true
@@ -246,7 +246,7 @@ write.csv(topgenes,
           quote=FALSE)
 ```
 
-These genes were used for external pathway analysis which returned pathways, provided in the text, which idicated these samples might have had a viral infection ast the time. The T cell samples were less affected, so these samples were only removed from the monocyte differential expression analysis.  Note: these adult samples were brought back later in training of the bulk immunological age score model.
+These genes were used for external pathway analysis which returned pathways, provided in the text, which idicated these samples might have had a viral infection ast the time. The T cell samples were less affected, so these samples were only removed from the monocyte differential expression analysis.  Note: these adult samples were brought back later in training of the bulk developmental stage score model.
 
 Differential Expression was run then for monocytes without APB#1, APB#5, and FPB#5.
 
@@ -280,14 +280,14 @@ write.csv(topgenes,
 # Store this topgenes table for later.
 topgenes_M <- topgenes
 
-# Export the DEdata with only FPB#5 removed for immunological age score model generation later.
+# Export the DEdata with only FPB#5 removed for developmental stage score model generation later.
 dedata = cluster3[,-which(names(cluster3) %in% c("1FPBmono#5"))]
 save(dedata, file = "Monocyte_dedata.rda")
 ```
 
 # 2. Extract broad fetal versus adult gene signature (Intersect the T and monocyte DE genes)
 
-This is for potential immunological age score marker selection
+This is for potential developmental stage score marker selection
 
 ```{r}
 full_Adult <- intersect(rownames(topgenes_T[topgenes_T$logFC>0,]),
@@ -300,7 +300,7 @@ full <- c(full_Adult, full_Fetal)
 
 A subset of these genes were validated by qRT-PCR and then used to score additional samples without the need for full microarray analysis.
 
-# 3. Calculate Immunological Age Scores for initial UCSF(SLVR) UCB cohort & controls
+# 3. Calculate Developmental Stage Scores for initial UCSF(SLVR) UCB cohort & controls
 
 ## 1) Read in qPCR data & pre-process
 
@@ -732,13 +732,13 @@ This function takes in a GEO ExpressionSet, then trims to (max variance probe fo
 ```{r}
 eset_to_ImmAgeScores <- function(eset = Monocyte_eset, loadings = Msig) {
   # INPUT: Takes in an ExpressionSet (eset) obtained from GEO, and a named
-    # vector gene loadings for Immunological Age Scoring (loadings; values
+    # vector gene loadings for Developmental Stage Scoring (loadings; values
     # named by gene_symbols)
-  # VALUE: Vector of Immunological Age Scores for each sample in the eset
+  # VALUE: Vector of Developmental Stage Scores for each sample in the eset
   # DETAILS: It subsets the loadings to genes probed in the expression dataset,
     # and utilizes expression data for the probes, of each gene in loadings,
     # with the highest variance as measured by interquartile range,
-    # then calculates Immunological Age Scores by summing the product of the
+    # then calculates Developmental Stage Scores by summing the product of the
     # loading for each gene * the relative (z-score) expression of each sample
     # for each gene.
 
@@ -930,7 +930,7 @@ summaryStats$agetype <- paste(summaryStats$age, summaryStats$celltype, sep = "\n
   # Plot theme and titles
   theme_classic() +
   theme(legend.position = "none") +
-  ylab("Immunological Age Score") +
+  ylab("Developmental Stage Score") +
   xlab(NULL) +
   ggtitle(NULL, subtitle = " Fetal and Adult\nassessed by qRT-PCR") +
   theme(axis.text.x= element_text(angle=45, hjust=1, vjust=1),
@@ -971,7 +971,7 @@ corddata <- alldata[alldata$platform=="qPCR" & alldata$age=="UCB",]
   # Plot theme and titles
   theme_classic() +
   theme(legend.position = "none") +
-  ylab("Immunological Age Score") +
+  ylab("Developmental Stage Score") +
   xlab(NULL) + ggtitle(NULL, subtitle = " Newborn UCB\nassessed by qRT-PCR") +
   theme(axis.text.x= element_text(angle=45, hjust=1, vjust=1),
         axis.title.y= element_text(size = 10),
@@ -1039,7 +1039,7 @@ dev.off()
                 color = "black") +
   theme_classic() +
   theme(legend.position = "none") +
-  ylab("Microarray-based\nImmunological Age Score") +
+  ylab("Microarray-based\nDevelopmental Stage Score") +
   xlab(NULL) + ggtitle(NULL, subtitle = "Monocytes\nmicroarray") +
   theme(axis.text.x= element_text(angle=45, hjust=1, vjust=1),
         axis.title.y= element_text(size = 8),
@@ -1063,7 +1063,7 @@ dev.off()
                 color = "black") +
   theme_classic() +
   theme(legend.position = "none") +
-  ylab("Microarray-based\nImmunological Age Score") +
+  ylab("Microarray-based\nDevelopmental Stage Score") +
   xlab(NULL) + ggtitle(NULL, subtitle = "  T cells\nmicroarray") +
   theme(axis.text.x= element_text(angle=45, hjust=1, vjust=1),
         axis.title.y= element_text(size = 8),

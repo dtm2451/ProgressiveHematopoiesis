@@ -1,7 +1,7 @@
 ---
 title: "Naive CD4 T cell bulk RNA-seq import and analysis"
 author: "Dan Bunis"
-date: "5/13/2020"
+date: "9/28/2020"
 output:
   html_document:
     toc: true
@@ -14,7 +14,7 @@ library(ggplot2)
 library(dplyr)
 library(DESeq2)
 library(rtracklayer)
-# BiocManager::install("dtm2451/dittoSeq")
+# BiocManager::install("dtm2451/dittoSeq@a3bfe2b")
 library(dittoSeq)
 library(clusterProfiler)
 library(org.Hs.eg.db)
@@ -550,7 +550,7 @@ FvC_padjFC[rownames(FvC_padjFC) %in% estrogen.genes & FvC_padjFC$log2FoldChange<
 ```{r pathways immune}
 ### Immune-related Pathways Only
 NonSigNonCancerPaths <- AllPaths[!grepl("signal|cancer|oma$",AllPaths)]
-ImmunePaths_noInf <- NonSigNonCancerPaths[-c(1,3,5:11,13:19,20,22,24,25,27:36,39,42,43,48,49,55,57:63,65:67)]
+ImmunePaths_noInf <- NonSigNonCancerPaths[-c(1,3,5:11,13:19,21,23,25:35,38,41,42,47,48,54,56:62,64:67)]
 dat_immNI <- dat[dat$Pathway %in% ImmunePaths_noInf,]
 # Make the plot
 (paths_plot <- ggplot(data = dat_immNI, aes(x = Comparison, y = Pathway, size = GeneRatio, fill = FDR_cut05)) +

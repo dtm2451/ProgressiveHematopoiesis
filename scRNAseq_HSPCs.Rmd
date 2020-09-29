@@ -1,7 +1,7 @@
 ---
 title: "HSPCs scRNA-seq import and analysis"
 author: "Dan Bunis"
-date: "5/13/2020"
+date: "9/28/2020"
 output:
   html_document:
     toc: true
@@ -10,10 +10,12 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, fig.height = 6, fig.width = 7, warning = F)
+# devtools::install_version(package = "adehabitat", version = "1.8.20")
+# devtools::install_version(package = "SDMTools", version = "1.1-221.1")
 # devtools::install_version(package = "Seurat", version = "3.0.2")
-library("Seurat")
+library(Seurat)
 library(MAST)
-# BiocManager::install("dtm2451/dittoSeq")
+# BiocManager::install("dtm2451/dittoSeq@a3bfe2b")
 library(dittoSeq)
 library(caret)
 library(ranger)
@@ -30,6 +32,7 @@ library(slingshot)
 
 ```{r}
 HSPCs <- Read10X("HSPCs/cellranger_Raw/")
+colnames(HSPCs) <- paste0(colnames(HSPCs), "-1")
 HSPCs <- CreateSeuratObject(HSPCs)
 getMetas(HSPCs)
 ```
@@ -372,7 +375,8 @@ pdf("HSPCs-Figs/HSPCs_trajectory_calls_byAge.pdf", w=3.5, h=2.5)
 dittoBarPlot(HSPCs, "age", group.by = "trajectory_calls", main = NULL,
              x.labels.rotate = TRUE, x.reorder = c(3,4,1,2,5),
              x.labels = renames[c(2:5,1)],
-             scale = "percent",
+             scale = "percent", 
+             var.labels.rename = c("Adult", "UCB", "Fetal"),
              xlab = NULL
              ) + theme(axis.text.x = element_text(size = 9))
 dev.off()
@@ -396,7 +400,7 @@ chisq.test(CvA)
 
 All are statistically significant!
 
-# 7. Immunological Age Scoring
+# 7. Developmental Stage Scoring
 
 To do so, I need to do these steps for each cluster:
 
@@ -446,7 +450,7 @@ FvA.MPP <- FindMarkers(HSPCs,
                        ident.1 = "fetal",
                        ident.2 = "adult",
                        test.use = "MAST")
-FvA.MPP_padjFC <- FvA.MPP[abs(FvA.MPP$avg_logFC)>=(log2(1.5)) &
+FvA.MPP_padjFC <- FvA.MPP[abs(FvA.MPP$avg_logFC)>=0.585 &
                             FvA.MPP$p_val_adj<0.05 &
                             !(is.na(FvA.MPP$p_val_adj)),]
 markers.MPP <- rownames(FvA.MPP_padjFC)
@@ -535,7 +539,7 @@ dittoPlot(HSPCs, "MPP.RFScore", group.by = "Sample", color.by = "age",
        x.labels = c(paste0("Fetal-",1:3),
                   paste0("UCB-",1:2),
                   paste0("Adult-",1:2)),
-       ylab = "Immunological Age Score",
+       ylab = "Developmental Stage Score",
        main = "HSC/MPP Annotated Cells",
        y.breaks = seq(0,1,0.5),
        jitter.size = 0.5,
@@ -580,7 +584,7 @@ FvA.MEP <- FindMarkers(HSPCs,
                        ident.1 = "fetal",
                        ident.2 = "adult",
                        test.use = "MAST")
-FvA.MEP_padjFC <- FvA.MEP[abs(FvA.MEP$avg_logFC)>=(log2(1.5)) &
+FvA.MEP_padjFC <- FvA.MEP[abs(FvA.MEP$avg_logFC)>=0.585 &
                             FvA.MEP$p_val_adj<0.05 &
                             !(is.na(FvA.MEP$p_val_adj)),]
 markers.MEP <- rownames(FvA.MEP_padjFC)
@@ -668,7 +672,7 @@ dittoPlot(HSPCs, "MEP.RFScore", group.by = "Sample", color.by = "age",
        x.labels = c(paste0("Fetal-",1:3),
                   paste0("UCB-",1:2),
                   paste0("Adult-",1:2)),
-       ylab = "Immunological Age Score",
+       ylab = "Developmental Stage Score",
        main = "MEP Annotated Cells",
        y.breaks = seq(0,1,0.5),
        jitter.size = 0.5,
@@ -713,7 +717,7 @@ FvA.GMP <- FindMarkers(HSPCs,
                        ident.1 = "fetal",
                        ident.2 = "adult",
                        test.use = "MAST")
-FvA.GMP_padjFC <- FvA.GMP[abs(FvA.GMP$avg_logFC)>=(log2(1.5)) &
+FvA.GMP_padjFC <- FvA.GMP[abs(FvA.GMP$avg_logFC)>=0.585 &
                             FvA.GMP$p_val_adj<0.05 &
                             !(is.na(FvA.GMP$p_val_adj)),]
 markers.GMP <- rownames(FvA.GMP_padjFC)
@@ -801,7 +805,7 @@ dittoPlot(HSPCs, "GMP.RFScore", group.by = "Sample", color.by = "age",
        x.labels = c(paste0("Fetal-",1:3),
                   paste0("UCB-",1:2),
                   paste0("Adult-",1:2)),
-       ylab = "Immunological Age Score",
+       ylab = "Developmental Stage Score",
        main = "GMP Annotated Cells",
        y.breaks = seq(0,1,0.5),
        jitter.size = 0.5,
@@ -813,7 +817,7 @@ dittoPlot(HSPCs, "GMP.RFScore", group.by = "Sample", color.by = "age",
 dev.off()
 ```
 
-### Statistical analysis of Immunological Age Scores
+### Statistical analysis of Developmental Stage Scores
 
 ```{r}
 # HSC/MPP

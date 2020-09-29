@@ -1,7 +1,7 @@
 ---
 title: "Dataset comparisons"
 author: "Dan Bunis"
-date: "2/26/2020"
+date: "9/28/2020"
 output:
   html_document:
     toc: true
@@ -57,7 +57,7 @@ sc4FvA <- FindMarkers(Tcells,
                      ident.1 = "4-fetal",
                      ident.2 = "4-adult",
                      test.use = "MAST")
-sc4FvA_padjFC <- sc4FvA[abs(sc4FvA$avg_logFC)>=log(1.8, exp(1)) &
+sc4FvA_padjFC <- sc4FvA[abs(sc4FvA$avg_logFC)>=0.585 &
                           sc4FvA$p_val_adj<=0.05 &
                           !is.na(sc4FvA$p_val_adj),]
 # Fetal vs UCB
@@ -65,7 +65,7 @@ sc4FvC <- FindMarkers(Tcells,
                      ident.1 = "4-fetal",
                      ident.2 = "4-cord",
                      test.use = "MAST")
-sc4FvC_padjFC <- sc4FvC[abs(sc4FvC$avg_logFC)>=log(1.8, exp(1)) &
+sc4FvC_padjFC <- sc4FvC[abs(sc4FvC$avg_logFC)>=0.585 &
                           sc4FvC$p_val_adj<=0.05 &
                           !is.na(sc4FvC$p_val_adj),]
 # UCB vs Adult
@@ -73,7 +73,7 @@ sc4CvA <- FindMarkers(Tcells,
                      ident.1 = "4-cord",
                      ident.2 = "4-adult",
                      test.use = "MAST")
-sc4CvA_padjFC <- sc4CvA[abs(sc4CvA$avg_logFC)>=log(1.8, exp(1)) &
+sc4CvA_padjFC <- sc4CvA[abs(sc4CvA$avg_logFC)>=0.585 &
                           sc4CvA$p_val_adj<=0.05 &
                           !is.na(sc4CvA$p_val_adj),]
 
@@ -98,13 +98,13 @@ CvA <- as.data.frame(results(bulkCD4_dds, contrast=c("Age","Cord","Adult")))
 
 #Trim to DE cutoffs
 FvA_padjFC <- FvA[(
-   (FvA$padj<=0.05) & (abs(FvA$log2FoldChange)>=log2(1.8)) & (!is.na(FvA$padj))
+   (FvA$padj<=0.05) & (abs(FvA$log2FoldChange)>=0.585*log2(exp(1))) & (!is.na(FvA$padj))
    ),]
 FvC_padjFC <- FvC[(
-  (FvC$padj<=0.05) & (abs(FvC$log2FoldChange)>=log2(1.8)) & (!is.na(FvC$padj))
+  (FvC$padj<=0.05) & (abs(FvC$log2FoldChange)>=0.585*log2(exp(1))) & (!is.na(FvC$padj))
   ),]
 CvA_padjFC <- CvA[(
-  (CvA$padj<=0.05) & (abs(CvA$log2FoldChange)>=log2(1.8)) & (!is.na(CvA$padj))
+  (CvA$padj<=0.05) & (abs(CvA$log2FoldChange)>=0.585*log2(exp(1))) & (!is.na(CvA$padj))
   ),]
 
 ### Split up and down genes.
@@ -222,8 +222,8 @@ hm <- dittoHeatmap(
   rownames(microarray_in[microarray_in$logFC<0,]),
   object = bulkCD4,
   group.by = "Age",
-  x.reorder = 3:1,
-   x.labels = c("FS", "UCB", "APB"),
+  x.reorder = 3:1, colors = 3:1,
+  x.labels = c("FS", "UCB", "APB"),
   plots = c("vlnplot","boxplot"),
   adjustment = "z-score",
   main = NULL, jitter.size = 0.3,
@@ -241,7 +241,7 @@ hm <- dittoHeatmap(
   rownames(microarray_in[microarray_in$logFC>0,]),
   object = bulkCD4,
   group.by = "Age",
-  x.reorder = 3:1,
+  x.reorder = 3:1, colors = 3:1,
   x.labels = c("FS", "UCB", "APB"),
   plots = c("vlnplot","boxplot"),
   adjustment = "z-score",
@@ -331,7 +331,7 @@ hm <- dittoHeatmap(rownames(genes_annot),
     c(Treg_UP_in),
     object = bulkCD4,
     group.by = "Age",
-    x.reorder = 3:1,
+    x.reorder = 3:1, colors = 3:1,
     x.labels = c("F", "UCB", "A"),
     plots = c("vlnplot","boxplot"),
     adjustment = "z-score",
@@ -367,7 +367,7 @@ hm <- dittoHeatmap(rownames(genes_annot),
     c(Treg_DOWN_in),
     object = bulkCD4,
     group.by = "Age",
-    x.reorder = 3:1,
+    x.reorder = 3:1, colors = 3:1,
     x.labels = c("F", "UCB", "A"),
     plots = c("vlnplot","boxplot"),
     adjustment = "z-score",
