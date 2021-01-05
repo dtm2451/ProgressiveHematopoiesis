@@ -668,7 +668,7 @@ sd(Tcells$RFScore[Tcells$age=="adult"])
 
 ```{r}
 # Reorder to put UCB~fetal-like genes first and UCB~adult-like genes last
-markers.feser <- markers.feser[c(1,9,12,15,2:4,6,8:10,11,14,17,13,16,5)]
+markers.feser <- markers.feser[c(1,9,12,15,2:4,6:8,10,11,14,17,13,16,5)]
 pdf("Tcells-Figs/RFmarkers_Tcells.pdf", w = 7.5, h = 6.5)
 multi_dittoPlot(Tcells, markers.feser, group.by = "age", ncol = 5, nrow = 4,
     x.reorder = 3:1, x.labels = c("F","U","A"), x.labels.rotate = FALSE,

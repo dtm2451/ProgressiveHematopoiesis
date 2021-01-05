@@ -121,8 +121,8 @@ ADULT_CvA <- rownames(CvA_padjFC[CvA_padjFC$log2FoldChange<0,])
 ## Venns
 
 ```{r}
-width = 2.5
-height = 2.3
+width = 1.5
+height = 0.85
 
 eulerr_options(fills = list(fill = dittoColors()[c(4,5)],
                             alpha = c(1,1)),
@@ -130,38 +130,32 @@ eulerr_options(fills = list(fill = dittoColors()[c(4,5)],
 set.seed(1908)
 pdf("Comparison-Figs/venn_CD4s_FetalvA.pdf", w=width, h=height)
 plot(venn(c('bulkCD4s' = list(FETAL_FvA),
-            'scCD4s' = list(FETAL_sc4FvA))),
-     main = "Fetal Enriched")
+            'scCD4s' = list(FETAL_sc4FvA))))
 dev.off()
 set.seed(1908)
 pdf("Comparison-Figs/venn_CD4s_AdultvF.pdf", w=width, h=height)
 plot(venn(c('bulkCD4s' = list(ADULT_FvA),
-            'scCD4s' = list(ADULT_sc4FvA))),
-     main = "Adult Enriched")
+            'scCD4s' = list(ADULT_sc4FvA))))
 dev.off()
 set.seed(1908)
 pdf("Comparison-Figs/venn_CD4s_FetalvC.pdf", w=width, h=height)
 plot(venn(c('bulkCD4s' = list(FETAL_FvC),
-            'scCD4s' = list(FETAL_sc4FvC))),
-     main = "Fetal Enriched")
+            'scCD4s' = list(FETAL_sc4FvC))))
 dev.off()
 set.seed(1908)
 pdf("Comparison-Figs/venn_CD4s_CordvF.pdf", w=width, h=height)
 plot(venn(c('bulkCD4s' = list(UCB_FvC),
-            'scCD4s' = list(UCB_sc4FvC))),
-     main = "UCB Enriched")
+            'scCD4s' = list(UCB_sc4FvC))))
 dev.off()
 set.seed(1908)
 pdf("Comparison-Figs/venn_CD4s_CordvA.pdf", w=width, h=height)
 plot(venn(c('bulkCD4s' = list(UCB_CvA),
-            'scCD4s' = list(UCB_sc4CvA))),
-     main = "UCB Enriched")
+            'scCD4s' = list(UCB_sc4CvA))))
 dev.off()
 set.seed(1908)
 pdf("Comparison-Figs/venn_CD4s_AdultvC.pdf", w=width, h=height)
 plot(venn(c('bulkCD4s' = list(ADULT_CvA),
-            'scCD4s' = list(ADULT_sc4CvA))),
-     main = "Adult Enriched")
+            'scCD4s' = list(ADULT_sc4CvA))))
 dev.off()
 ```
 
