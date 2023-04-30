@@ -1,0 +1,41 @@
+Todo// # here is a Bio Julia codebook documentation on testing PyCall and installation:
+
+## Bio Julia Codebook: Testing PyCall and Installation
+
+### Introduction
+
+PyCall is a Julia package that allows you to call Python functions and use Python libraries directly from your Julia code. This can be useful if you need to use a Python library that does not have a Julia equivalent or if you are more familiar with Python. 
+
+In this codebook, we will walk you through the steps to test PyCall and install it on your machine.
+
+### Testing PyCall
+
+Before installing PyCall, you can test it to make sure it is working properly. Here's how:
+
+1. Open Julia REPL (Read-Evaluate-Print Loop).
+
+2. Type `using Pkg; Pkg.add("PyCall")` to install PyCall.
+
+3. Type `using PyCall` to load the PyCall package.
+
+4. Type `pyimport("sys").version` to check the version of Python that PyCall is currently using.
+
+If PyCall is working correctly, you should see the version number of the Python interpreter that it is using.
+
+### Installation
+
+If you have tested PyCall and it is working properly, you can now install it on your machine. Here's how:
+
+1. Open Julia REPL.
+
+2. Type `using Pkg; Pkg.add("PyCall")` to install PyCall.
+
+3. When prompted, type `y` to confirm the installation.
+
+Once the installation is complete, you can start using PyCall to call Python functions and use Python libraries directly from your Julia code.
+
+### Conclusion
+
+Congratulations! You have successfully tested PyCall and installed it on your machine. You can now start using PyCall to call Python functions and use Python libraries directly from your Julia code.
+
+ 
